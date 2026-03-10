@@ -1,0 +1,18 @@
+# Config for fit_density.py + plot_density.py
+# Parametric lognormal-Poisson fit: rate(delta) and sigma(delta) are
+# explicit functions of local matter density, fit over the full field.
+
+n_delta_bins: 10            # number of density bins used only for plotting
+
+datafile: /path/to/data.h5  # HDF5 file with delta_2d and <catalog>/Ng datasets
+savedir:  /path/to/output   # directory for samples and figures
+catalog:  catalog_name      # HDF5 group name for the galaxy catalog
+
+# Model variant — choose one option from each key:
+mean_type:  neyrinck        # 'neyrinck' | 'powerlaw'
+z_type:     shared          # 'shared' | 'independent' | 'zero'
+sigma_type: density         # 'density' | 'constant'  (ignored if z_type: zero)
+
+# NUTS tuning (optional)
+num_warmup:  500
+num_samples: 500

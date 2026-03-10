@@ -1,0 +1,8 @@
+jax
+jaxlib
+numpyro
+h5py
+numpy
+matplotlib
+pyyaml
+tqdm

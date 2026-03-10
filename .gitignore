@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Package install
+*.pth
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Data and large outputs
+*.h5
+*.hdf5
+*.pkl
+*.npy
+figs/
+
+# OS
+.DS_Store
+Thumbs.db

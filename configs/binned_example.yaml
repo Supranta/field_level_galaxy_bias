@@ -1,0 +1,13 @@
+# Config for fit_binned.py + plot_binned.py
+# Non-parametric lognormal-Poisson fit: rate and sigma are free parameters
+# in each density bin.
+
+n_delta_bins: 10            # number of equal-count density bins
+
+datafile: /path/to/data.h5  # HDF5 file with delta_2d and <catalog>/Ng datasets
+savedir:  /path/to/output   # directory for samples, summaries, and figures
+catalog:  catalog_name      # HDF5 group name for the galaxy catalog
+
+# NUTS tuning (optional)
+num_warmup:  500
+num_samples: 500
