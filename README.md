@@ -75,7 +75,7 @@ python plot_binned.py configs/my_binned.yaml   # generate figures
 
 ```bash
 python fit_density.py      configs/my_density.yaml  # run single MCMC
-python plot_density_new.py configs/my_density.yaml  # generate figures
+python plot_density.py configs/my_density.yaml  # generate figures
 ```
 
 ## Output files
@@ -103,7 +103,7 @@ lnp/                    Core library
 fit_binned.py           Non-parametric per-bin MCMC fit
 fit_density.py          Parametric full-field MCMC fit
 plot_binned.py          Figures for binned pipeline
-plot_density_new.py     Figures for density pipeline
+plot_density.py     Figures for density pipeline
 
 configs/
   binned_example.yaml   Example config for the binned pipeline
