@@ -1,6 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import cm
+from getdist import MCSamples
+import getdist.plots as gdplots
 
 
 def plot_hist(ax, Ng_data, Ng_model):
@@ -112,6 +114,23 @@ def plot_count_pdfs(Ng_data, Ng_model, N_types, savepath):
     plt.tight_layout()
     plt.savefig(savepath, dpi=150.)
     plt.close()
+
+
+def plot_getdist_contours(data_matrix, names, labels, savepath):
+    """Triangle (corner) plot of global model parameters using GetDist.
+
+    Parameters
+    ----------
+    data_matrix : (n_mcmc, n_params) ndarray
+    names       : list of str  — plain-string parameter names (no spaces)
+    labels      : list of str  — LaTeX labels (without $ delimiters)
+    savepath    : str
+    """
+    mc_samples = MCSamples(samples=data_matrix, names=names, labels=labels)
+    g = gdplots.get_subplot_plotter()
+    g.triangle_plot([mc_samples], filled=True)
+    g.export(savepath)
+    plt.close('all')
 
 
 def plot_corrcoef_matrix(rho_c_data, rho_c_model, N_types, savepath):

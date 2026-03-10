@@ -87,6 +87,7 @@ python plot_density.py configs/my_density.yaml  # generate figures
 | `<savedir>/log_likelihood.npy` | Per-sample log-likelihood (density pipeline) |
 | `<savedir>/figs/mean_variance_delta.png` | Mean, variance/mean, $\sigma$ vs $\log(1+\delta)$ |
 | `<savedir>/figs/rho_c_delta.png` | Cross-correlations vs $\log(1+\delta)$ |
+| `<savedir>/figs/param_contours.png` | GetDist triangle plot of global parameters (density pipeline) |
 | `<savedir>/figs/pdf/<n>.png` | Per-bin count PDFs (binned pipeline) |
 | `<savedir>/figs/corrcoef/<n>.png` | Per-bin correlation matrices (binned pipeline) |
 

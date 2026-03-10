@@ -16,14 +16,12 @@ lnp/                    Core library package
 fit_binned.py           Non-parametric per-bin MCMC fit
 fit_density.py          Parametric full-field MCMC fit
 plot_binned.py          Figures for binned pipeline
-plot_density_new.py     Figures for density pipeline (new version using lnp.*)
+plot_density.py         Figures for density pipeline
 
 configs/
   binned_example.yaml   Example config for the binned pipeline
   density_example.yaml  Example config for the density pipeline
 ```
-
-Old scripts (superseded but kept for reference): `fit_lognormal_poisson.py`, `fit_lognormal_poisson_density.py`, `plot.py`, `plot_density.py`, `models.py`, `density_functions.py`
 
 Install the package before running scripts: `pip install -e .`
 
@@ -86,5 +84,6 @@ num_samples: 500   # optional
 - `<savedir>/log_likelihood.npy` — per-sample log-likelihood (density)
 - `<savedir>/figs/mean_variance_delta.png` — mean, variance/mean, sigma vs log(1+delta)
 - `<savedir>/figs/rho_c_delta.png` — pairwise cross-correlations vs log(1+delta)
+- `<savedir>/figs/param_contours.png` — GetDist triangle plot of global parameters (density)
 - `<savedir>/figs/pdf/<n>.png` — per-bin count PDFs (binned)
 - `<savedir>/figs/corrcoef/<n>.png` — per-bin correlation matrices (binned)

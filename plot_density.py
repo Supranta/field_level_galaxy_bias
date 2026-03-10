@@ -21,7 +21,8 @@ from tqdm import trange
 
 from lnp.data import load_data, compute_delta_bins, compute_delta_mean
 from lnp.density_functions import neyrinck_model_jax, sigma_model_jax
-from lnp.plotting import plot_mean_variance_sigma, plot_crosscorr_vs_density
+from lnp.plotting import (plot_mean_variance_sigma, plot_crosscorr_vs_density,
+                          plot_getdist_contours)
 
 
 def main(config_path):
@@ -179,6 +180,41 @@ def main(config_path):
     savepath = savedir + '/figs/rho_c_delta.png'
     plt.savefig(savepath, dpi=150.)
     plt.close()
+    print("Saved:", savepath)
+
+    # ---- Plot 3: GetDist parameter contours ----
+    print("Plotting parameter contours...")
+    names, labels, columns = [], [], []
+
+    per_type_params = ['n_bar', 'beta']
+    per_type_latex  = [r'\bar{n}', r'\beta']
+    if HAS_NEYRINCK_MEAN:
+        per_type_params += ['delta_g']
+        per_type_latex  += [r'\delta_g']
+    if HAS_Z:
+        if HAS_DENSITY_SIGMA:
+            per_type_params += ['S']
+            per_type_latex  += ['S']
+        else:
+            per_type_params += ['sigma']
+            per_type_latex  += [r'\sigma']
+
+    for key, latex in zip(per_type_params, per_type_latex):
+        for t in range(N_types):
+            names.append('%s_%d' % (key, t))
+            labels.append('%s_{%d}' % (latex, t))
+            columns.append(samples[key][:, t])
+
+    if HAS_Z and HAS_DENSITY_SIGMA:
+        for key, latex in [('gamma1', r'\gamma_1'), ('gamma2', r'\gamma_2'),
+                           ('A_sigma', 'A_\\sigma')]:
+            names.append(key)
+            labels.append(latex)
+            columns.append(samples[key])
+
+    data_matrix = np.column_stack(columns)
+    savepath = savedir + '/figs/param_contours.png'
+    plot_getdist_contours(data_matrix, names, labels, savepath)
     print("Saved:", savepath)
 
 
