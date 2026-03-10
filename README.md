@@ -64,26 +64,18 @@ An HDF5 file with:
 
 ## Usage
 
-Copy one of the example configs and fill in your paths:
-
-```bash
-cp configs/binned_example.yaml  my_binned.yaml
-cp configs/density_example.yaml my_density.yaml
-# edit datafile, savedir, catalog
-```
-
 **Non-parametric binned pipeline:**
 
 ```bash
-python fit_binned.py  my_binned.yaml   # run MCMC per bin
-python plot_binned.py my_binned.yaml   # generate figures
+python fit_binned.py  configs/my_binned.yaml   # run MCMC per bin
+python plot_binned.py configs/my_binned.yaml   # generate figures
 ```
 
 **Parametric density pipeline:**
 
 ```bash
-python fit_density.py      my_density.yaml  # run single MCMC
-python plot_density_new.py my_density.yaml  # generate figures
+python fit_density.py      configs/my_density.yaml  # run single MCMC
+python plot_density_new.py configs/my_density.yaml  # generate figures
 ```
 
 ## Output files
