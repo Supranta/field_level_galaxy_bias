@@ -67,7 +67,7 @@ def _sample_density_sigma_params(N_types):
     S       = numpyro.sample("S",       dist.Uniform(0.05, 5.0).expand([N_types]))
     gamma1  = numpyro.sample("gamma1",  dist.Uniform(0.0, 1.0))
     gamma2  = numpyro.sample("gamma2",  dist.Uniform(-5.0, 0.0))
-    A_sigma = numpyro.sample("A_sigma", dist.Uniform(0.0, 0.1))
+    A_sigma = numpyro.sample("A_sigma", dist.Uniform(0.0, 0.5))
     return S, gamma1, gamma2, A_sigma
 
 
@@ -100,10 +100,57 @@ def _observe(rate, counts):
 
 
 # ---------------------------------------------------------------------------
+# Density model (parametric) — shared body
+# ---------------------------------------------------------------------------
+
+def _density_model_body(counts, r, mean_type, z_type, sigma_type):
+    """Shared model body for both single-scale and multiscale variants.
+
+    Parameters
+    ----------
+    counts : (N_types, N_pix) int array
+    r : (N_pix,) float array
+        Effective density ratio r_eff = 1 + delta_eff.
+    mean_type, z_type, sigma_type : str
+        Same semantics as in build_model.
+    """
+    N_types, N_pix = counts.shape
+
+    # ---- Mean ----
+    if mean_type == 'neyrinck':
+        n_bar, beta, delta_g = _sample_neyrinck_params(N_types)
+        mu_det = _neyrinck_mean(r, n_bar, beta, delta_g)
+    else:
+        n_bar, beta = _sample_powerlaw_params(N_types)
+        mu_det = _powerlaw_mean(r, n_bar, beta)
+
+    # ---- Pure Poisson (no lognormal scatter) ----
+    if z_type == 'zero':
+        with numpyro.plate("pix", N_pix):
+            _observe(mu_det, counts)
+        return
+
+    # ---- Sigma ----
+    if sigma_type == 'density':
+        S, gamma1, gamma2, A_sigma = _sample_density_sigma_params(N_types)
+    else:
+        sigma_t = _sample_constant_sigma_params(N_types)
+
+    # ---- Shared z: one draw per pixel, shared across all types ----
+    with numpyro.plate("pix", N_pix):
+        z     = numpyro.sample("z", dist.Normal(0.0, 1.0))
+        sigma = (_density_sigma(r, S, gamma1, gamma2, A_sigma)
+                 if sigma_type == 'density'
+                 else jnp.clip(sigma_t[:, None] * jnp.ones((1, N_pix)), 1e-6, 4.0))
+        lam   = jnp.exp(sigma * z[None, :] - 0.5 * sigma ** 2)
+        _observe(mu_det * lam, counts)
+
+
+# ---------------------------------------------------------------------------
 # Density model (parametric) — factory
 # ---------------------------------------------------------------------------
 
-def build_model(mean_type, z_type, sigma_type=None):
+def build_model(mean_type, z_type, sigma_type=None, multiscale=False, tidal=False):
     """Build a NumPyro model from three orthogonal design choices.
 
     Parameters
@@ -112,72 +159,94 @@ def build_model(mean_type, z_type, sigma_type=None):
         Functional form for the mean galaxy count as a function of density.
         - 'neyrinck' : n_bar * r^beta * exp(-rho_g / r)  (void suppression)
         - 'powerlaw' : n_bar * r^beta
-    z_type : {'shared', 'independent', 'zero'}
+    z_type : {'shared', 'zero'}
         How the lognormal latent field z is drawn per pixel.
-        - 'shared'      : one z per pixel, shared across all galaxy types
-                          (induces cross-correlations between types)
-        - 'independent' : one z per pixel per type (no cross-correlations)
-        - 'zero'        : no lognormal scatter; reduces to pure Poisson
+        - 'shared' : one z per pixel, shared across all galaxy types
+                     (induces cross-correlations between types)
+        - 'zero'   : no lognormal scatter; reduces to pure Poisson
     sigma_type : {'density', 'constant'}, optional
         How the lognormal scatter sigma varies with density.
         Ignored when z_type='zero'.
         - 'density'  : sigma(r) = S * (r^gamma1 + A_sigma * r^gamma2)
         - 'constant' : sigma is a per-type constant
+    multiscale : bool, optional
+        If True, the effective density is a weighted combination of
+        multi-scale smoothed fields:
+
+            delta_eff = A_0 * delta_0 + A_1 * delta_1 + ... + A_N * delta_N
+
+        Model receives delta_fields (N_scales, N_pix) instead of delta.
+        Priors:
+            A_0    = 1 (deterministic, unsmoothed anchor)
+            A_1..N ~ Uniform(-10.0, 10.0)
+    tidal : bool, optional
+        If True, adds a tidal bias correction to the effective density:
+
+            delta_eff += b_s2 * s2
+
+        where s2 is the squared tidal field. b_s2 is shared across galaxy
+        types. Model receives an additional s2 (N_pix,) argument.
+        Prior:
+            b_s2 ~ Uniform(-5.0, 5.0)
+
+        Can be combined with multiscale=True.
 
     Returns
     -------
     model : callable
-        NumPyro model with signature model(counts, delta).
+        NumPyro model. Signature:
+            model(counts, delta)                         [base]
+            model(counts, delta_fields)                  [multiscale]
+            model(counts, delta, s2)                     [tidal]
+            model(counts, delta_fields, s2)              [multiscale + tidal]
     """
     if mean_type not in ('neyrinck', 'powerlaw'):
         raise ValueError("mean_type must be 'neyrinck' or 'powerlaw', got '%s'" % mean_type)
-    if z_type not in ('shared', 'independent', 'zero'):
-        raise ValueError("z_type must be 'shared', 'independent', or 'zero', got '%s'" % z_type)
+    if z_type not in ('shared', 'zero'):
+        raise ValueError("z_type must be 'shared' or 'zero', got '%s'" % z_type)
     if z_type != 'zero' and sigma_type not in ('density', 'constant'):
         raise ValueError("sigma_type must be 'density' or 'constant', got '%s'" % sigma_type)
 
-    def model(counts, delta):
-        N_types, N_pix = counts.shape
-        r = 1.0 + delta
-
-        # ---- Mean ----
-        if mean_type == 'neyrinck':
-            n_bar, beta, delta_g = _sample_neyrinck_params(N_types)
-            mu_det = _neyrinck_mean(r, n_bar, beta, delta_g)
+    def _multiscale_delta_eff(delta_fields):
+        """Compute weighted delta_eff from multi-scale fields. Returns (N_pix,)."""
+        N_scales = delta_fields.shape[0]
+        A_0 = numpyro.deterministic("A_0", jnp.array([1.]))
+        if N_scales > 1:
+            A_smooth = numpyro.sample(
+                "A_smooth", dist.Uniform(-10.0, 10.0).expand([N_scales - 1])
+            )
+            A = jnp.concatenate([A_0, A_smooth])
         else:
-            n_bar, beta = _sample_powerlaw_params(N_types)
-            mu_det = _powerlaw_mean(r, n_bar, beta)
+            A = A_0
+        return jnp.tensordot(A, delta_fields, axes=[[0], [0]])
 
-        # ---- Pure Poisson (no lognormal scatter) ----
-        if z_type == 'zero':
-            with numpyro.plate("pix", N_pix):
-                _observe(mu_det, counts)
-            return
+    def _tidal_correction(delta_eff, s2):
+        """Add tidal bias correction to delta_eff. Returns (N_pix,)."""
+        # b_s2 = numpyro.sample("b_s2", dist.Uniform(-5.0, 5.0))
+        b_s2 = numpyro.deterministic("b_s2", jnp.array([1.]))
+        return delta_eff + b_s2 * s2
 
-        # ---- Sigma ----
-        if sigma_type == 'density':
-            S, gamma1, gamma2, A_sigma = _sample_density_sigma_params(N_types)
-        else:
-            sigma_t = _sample_constant_sigma_params(N_types)
+    if multiscale and tidal:
+        def model(counts, delta_fields, s2):
+            delta_eff = _multiscale_delta_eff(delta_fields)
+            delta_eff = _tidal_correction(delta_eff, s2)
+            delta_eff = (delta_eff / delta_eff.std()) * delta_fields[0].std()
+            _density_model_body(counts, 1.0 + delta_eff, mean_type, z_type, sigma_type)
 
-        # ---- Shared z: one draw per pixel, same across all types ----
-        if z_type == 'shared':
-            with numpyro.plate("pix", N_pix):
-                z     = numpyro.sample("z", dist.Normal(0.0, 1.0))
-                sigma = (_density_sigma(r, S, gamma1, gamma2, A_sigma)
-                         if sigma_type == 'density'
-                         else jnp.clip(sigma_t[:, None] * jnp.ones((1, N_pix)), 1e-6, 4.0))
-                lam   = jnp.exp(sigma * z[None, :] - 0.5 * sigma ** 2)
-                _observe(mu_det * lam, counts)
+    elif multiscale:
+        def model(counts, delta_fields):
+            delta_eff = _multiscale_delta_eff(delta_fields)
+            delta_eff = (delta_eff / delta_eff.std()) * delta_fields[0].std()
+            _density_model_body(counts, 1.0 + delta_eff, mean_type, z_type, sigma_type)
 
-        # ---- Independent z: one draw per type per pixel ----
-        else:
-            z = numpyro.sample("z", dist.Normal(jnp.zeros((N_types, N_pix)), 1.0))
-            with numpyro.plate("pix", N_pix):
-                sigma = (_density_sigma(r, S, gamma1, gamma2, A_sigma)
-                         if sigma_type == 'density'
-                         else jnp.clip(sigma_t[:, None] * jnp.ones((1, N_pix)), 1e-6, 4.0))
-                lam   = jnp.exp(sigma * z - 0.5 * sigma ** 2)
-                _observe(mu_det * lam, counts)
+    elif tidal:
+        def model(counts, delta, s2):
+            delta_eff = _tidal_correction(delta, s2)
+            delta_eff = (delta_eff / delta_eff.std()) * delta.std()
+            _density_model_body(counts, 1.0 + delta_eff, mean_type, z_type, sigma_type)
+
+    else:
+        def model(counts, delta):
+            _density_model_body(counts, 1.0 + delta, mean_type, z_type, sigma_type)
 
     return model

@@ -10,9 +10,15 @@ catalog:  catalog_name      # HDF5 group name for the galaxy catalog
 
 # Model variant — choose one option from each key:
 mean_type:  neyrinck        # 'neyrinck' | 'powerlaw'
-z_type:     shared          # 'shared' | 'independent' | 'zero'
+z_type:     shared          # 'shared' | 'zero'
 sigma_type: density         # 'density' | 'constant'  (ignored if z_type: zero)
 
 # NUTS tuning (optional)
 num_warmup:  500
 num_samples: 500
+
+# Multi-scale and/or tidal bias (all optional)
+# box_size is required whenever smoothing_scales or tidal is set.
+# smoothing_scales: [1.0, 2.0, 5.0, 10.0]  # activates multiscale mode
+# tidal: true                               # activates tidal bias (b_s2 * s2)
+# box_size: 1000.0                          # physical side length of the box
