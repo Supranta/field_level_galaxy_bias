@@ -9,7 +9,7 @@ savedir:  /path/to/output   # directory for samples and figures
 catalog:  catalog_name      # HDF5 group name for the galaxy catalog
 
 # Model variant — choose one option from each key:
-mean_type:  neyrinck        # 'neyrinck' | 'powerlaw'
+mean_type:  neyrinck        # 'neyrinck' | 'neyrinck_shared' | 'powerlaw'
 z_type:     shared          # 'shared' | 'zero'
 sigma_type: density         # 'density' | 'constant'  (ignored if z_type: zero)
 

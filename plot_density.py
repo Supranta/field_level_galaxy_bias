@@ -45,7 +45,7 @@ def main(config_path):
 
     HAS_Z             = z_type != 'zero'
     HAS_DENSITY_SIGMA = HAS_Z and sigma_type == 'density'
-    HAS_NEYRINCK_MEAN = mean_type == 'neyrinck'
+    HAS_NEYRINCK_MEAN = mean_type in ('neyrinck', 'neyrinck_shared')
 
     delta_slab, Ng = load_data(datafile, catalog)
     N_types    = Ng.shape[0]
@@ -90,11 +90,17 @@ def main(config_path):
     def _mu_det(r_3d):
         """Deterministic mean rate. Shape: (n_mcmc, N_types, N_pix_bin)."""
         if HAS_NEYRINCK_MEAN:
+            dg = samples['delta_g']
+            # neyrinck_shared: dg is (n_mcmc,); neyrinck: dg is (n_mcmc, N_types)
+            if dg.ndim == 1:
+                dg = dg[:, None, None]   # broadcast over types and pixels
+            else:
+                dg = dg[:, :, None]
             return np.array(neyrinck_model_jax(
                 r_3d,
                 samples['n_bar'][:, :, None],
                 samples['beta'][:, :, None],
-                samples['delta_g'][:, :, None],
+                dg,
             ))
         return samples['n_bar'][:, :, None] * r_3d ** samples['beta'][:, :, None]
 
@@ -164,7 +170,7 @@ def main(config_path):
 
     per_type_params = ['n_bar', 'beta']
     per_type_latex  = [r'\bar{n}', r'\beta']
-    if HAS_NEYRINCK_MEAN:
+    if mean_type == 'neyrinck':
         per_type_params += ['delta_g']
         per_type_latex  += [r'\delta_g']
     if HAS_Z:
@@ -180,6 +186,11 @@ def main(config_path):
             names.append('%s^%d' % (key, t))
             labels.append('%s^{%d}' % (latex, t))
             columns.append(samples[key][:, t])
+
+    if mean_type == 'neyrinck_shared':
+        names.append('delta_g')
+        labels.append(r'\delta_g')
+        columns.append(samples['delta_g'])
 
     if HAS_Z and HAS_DENSITY_SIGMA:
         for key, latex in [('gamma1', r'\gamma_1'), ('gamma2', r'\gamma_2'),

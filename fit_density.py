@@ -5,7 +5,7 @@ parametric functions of the local matter density delta. All pixels are fit
 simultaneously in a single MCMC run.
 
 Model variants are controlled by config keys:
-    mean_type  : 'neyrinck' | 'powerlaw'
+    mean_type  : 'neyrinck' | 'neyrinck_shared' | 'powerlaw'
     z_type     : 'shared' | 'zero'
     sigma_type : 'density' | 'constant'
 

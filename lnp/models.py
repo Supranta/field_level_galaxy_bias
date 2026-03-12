@@ -1,9 +1,9 @@
+import jax
 import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
 
 from lnp.density_functions import neyrinck_model_jax, sigma_model_jax
-
 
 # ---------------------------------------------------------------------------
 # Binned model (non-parametric)
@@ -50,29 +50,78 @@ def joint_lognormal_model(counts):
 # Density model (parametric) — building blocks
 # ---------------------------------------------------------------------------
 
+def softened_uniform(name, low, high, shape=None, sigma=1.):
+    """
+    HMC-friendly replacement for numpyro Uniform(low, high).
+
+    Samples an unconstrained Normal in R, then sigmoid-transforms
+    into (low, high). Avoids hard boundary walls and Jacobian
+    divergences that degrade HMC/NUTS performance.
+
+    Parameters
+    ----------
+    name  : str
+        NumPyro parameter name. The unconstrained sample is stored
+        as f"{name}_raw"; the transformed value as `name`.
+    low   : float
+        Lower bound of the desired interval.
+    high  : float
+        Upper bound of the desired interval.
+    shape : list/tuple or None
+        Shape of the parameter array, e.g. [N_types].
+        None for a scalar parameter.
+    sigma : float
+        Std dev of the Normal in unconstrained space (default 2.0).
+        Larger -> flatter/more uniform in (low, high).
+        Smaller -> more concentrated near the midpoint.
+
+    Returns
+    -------
+    x : jnp array of shape `shape` (or scalar)
+        Transformed parameter living in (low, high).
+    """
+    prior = dist.Normal(0.0, sigma)
+    if shape is not None:
+        prior = prior.expand(shape)
+
+    x_raw = numpyro.sample(f"{name}_raw", prior)
+
+    x = numpyro.deterministic(
+        name,
+        low + (high - low) * jax.nn.sigmoid(x_raw)
+    )
+    return x
+    
 def _sample_neyrinck_params(N_types):
-    n_bar   = numpyro.sample("n_bar",   dist.Uniform(1e-6, 100.0).expand([N_types]))
-    beta    = numpyro.sample("beta",    dist.Uniform(0.0, 5.0).expand([N_types]))
-    delta_g = numpyro.sample("delta_g", dist.Uniform(-0.99, -0.1).expand([N_types]))
+    n_bar   = softened_uniform("n_bar",   1e-6,  100.0, shape=[N_types])
+    beta    = softened_uniform("beta",    0.,   4.0,    shape=[N_types])
+    delta_g = softened_uniform("delta_g", -0.99, 0.5,    shape=[N_types])
     return n_bar, beta, delta_g
 
 
+def _sample_neyrinck_shared_params(N_types):
+    n_bar   = softened_uniform("n_bar",   1e-6,  100.0, shape=[N_types])
+    beta    = softened_uniform("beta",    0.,   4.0,    shape=[N_types])
+    delta_g = softened_uniform("delta_g", -0.99, 0.5)    # scalar, shared
+    return n_bar, beta, jnp.broadcast_to(delta_g, (N_types,))
+
+
 def _sample_powerlaw_params(N_types):
-    n_bar = numpyro.sample("n_bar", dist.Uniform(1e-6, 100.0).expand([N_types]))
-    beta  = numpyro.sample("beta",  dist.Uniform(0.0, 5.0).expand([N_types]))
+    n_bar = softened_uniform("n_bar", 1e-6, 100.0, shape=[N_types])
+    beta  = softened_uniform("beta",  0.,  4.0,    shape=[N_types])
     return n_bar, beta
 
 
 def _sample_density_sigma_params(N_types):
-    S       = numpyro.sample("S",       dist.Uniform(0.05, 5.0).expand([N_types]))
-    gamma1  = numpyro.sample("gamma1",  dist.Uniform(0.0, 1.0))
-    gamma2  = numpyro.sample("gamma2",  dist.Uniform(-5.0, 0.0))
-    A_sigma = numpyro.sample("A_sigma", dist.Uniform(0.0, 0.5))
+    S       = softened_uniform("S",       0.05, 5.0,  shape=[N_types])
+    gamma1  = softened_uniform("gamma1",  0.0,  1.0)
+    gamma2  = softened_uniform("gamma2",  -5.0, 0.0)
+    A_sigma = softened_uniform("A_sigma", 0.0,  0.5)
     return S, gamma1, gamma2, A_sigma
 
 
 def _sample_constant_sigma_params(N_types):
-    return numpyro.sample("sigma", dist.Uniform(0.0, 5.0).expand([N_types]))
+    return softened_uniform("sigma", 0.0, 5.0, shape=[N_types])
 
 
 def _neyrinck_mean(r, n_bar, beta, delta_g):
@@ -120,7 +169,10 @@ def _density_model_body(counts, r, mean_type, z_type, sigma_type):
     if mean_type == 'neyrinck':
         n_bar, beta, delta_g = _sample_neyrinck_params(N_types)
         mu_det = _neyrinck_mean(r, n_bar, beta, delta_g)
-    else:
+    elif mean_type == 'neyrinck_shared':
+        n_bar, beta, delta_g = _sample_neyrinck_shared_params(N_types)
+        mu_det = _neyrinck_mean(r, n_bar, beta, delta_g)
+    else:  # 'powerlaw'
         n_bar, beta = _sample_powerlaw_params(N_types)
         mu_det = _powerlaw_mean(r, n_bar, beta)
 
@@ -155,10 +207,11 @@ def build_model(mean_type, z_type, sigma_type=None, multiscale=False, tidal=Fals
 
     Parameters
     ----------
-    mean_type : {'neyrinck', 'powerlaw'}
+    mean_type : {'neyrinck', 'neyrinck_shared', 'powerlaw'}
         Functional form for the mean galaxy count as a function of density.
-        - 'neyrinck' : n_bar * r^beta * exp(-rho_g / r)  (void suppression)
-        - 'powerlaw' : n_bar * r^beta
+        - 'neyrinck'        : n_bar * r^beta * exp(-rho_g / r), per-type delta_g
+        - 'neyrinck_shared' : n_bar * r^beta * exp(-rho_g / r), single delta_g shared across types
+        - 'powerlaw'        : n_bar * r^beta  (no void suppression)
     z_type : {'shared', 'zero'}
         How the lognormal latent field z is drawn per pixel.
         - 'shared' : one z per pixel, shared across all galaxy types
@@ -200,8 +253,8 @@ def build_model(mean_type, z_type, sigma_type=None, multiscale=False, tidal=Fals
             model(counts, delta, s2)                     [tidal]
             model(counts, delta_fields, s2)              [multiscale + tidal]
     """
-    if mean_type not in ('neyrinck', 'powerlaw'):
-        raise ValueError("mean_type must be 'neyrinck' or 'powerlaw', got '%s'" % mean_type)
+    if mean_type not in ('neyrinck', 'neyrinck_shared', 'powerlaw'):
+        raise ValueError("mean_type must be 'neyrinck', 'neyrinck_shared', or 'powerlaw', got '%s'" % mean_type)
     if z_type not in ('shared', 'zero'):
         raise ValueError("z_type must be 'shared' or 'zero', got '%s'" % z_type)
     if z_type != 'zero' and sigma_type not in ('density', 'constant'):
