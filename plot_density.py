@@ -45,7 +45,7 @@ def main(config_path):
 
     HAS_Z             = z_type != 'zero'
     HAS_DENSITY_SIGMA = HAS_Z and sigma_type == 'density'
-    HAS_NEYRINCK_MEAN = mean_type in ('neyrinck', 'neyrinck_shared')
+    HAS_NEYRINCK_MEAN = mean_type == 'neyrinck'
 
     delta_slab, Ng = load_data(datafile, catalog)
     N_types    = Ng.shape[0]

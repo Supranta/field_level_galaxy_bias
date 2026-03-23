@@ -4,7 +4,7 @@ import numpy as np
 from numpyro.infer import MCMC, NUTS, log_likelihood
 
 
-def run_nuts(model, counts, delta=None, delta_fields=None, s2=None,
+def run_nuts(model, counts, delta=None,
              num_warmup=500, num_samples=500,
              seed=42, compute_log_lik=False):
     """Run NUTS on a NumPyro model.
@@ -13,15 +13,10 @@ def run_nuts(model, counts, delta=None, delta_fields=None, s2=None,
     ----------
     model : callable
         NumPyro model. Called as model(counts) if delta is None,
-        else model(counts, delta) or model(counts, delta_fields).
+        else model(counts, delta).
     counts : (N_types, N_pix) array-like of int
     delta : (N_pix,) array-like of float, optional
-        Matter overdensity field. Required for the single-scale density model.
-    delta_fields : (N_scales, N_pix) array-like of float, optional
-        Multi-scale density fields for the multiscale model. Index 0 must be
-        the unsmoothed field. Mutually exclusive with delta.
-    s2 : (N_pix,) array-like of float, optional
-        Squared tidal field. Required when the model was built with tidal=True.
+        Matter overdensity field. Required for the density model.
     num_warmup : int
     num_samples : int
     seed : int
@@ -36,17 +31,10 @@ def run_nuts(model, counts, delta=None, delta_fields=None, s2=None,
     log_lik : (n_samples,) ndarray
         Only returned when compute_log_lik=True.
     """
-    if delta is not None and delta_fields is not None:
-        raise ValueError("Provide either delta or delta_fields, not both.")
-
-    counts_jax    = jnp.array(counts, dtype=jnp.int32)
-    model_kwargs  = {'counts': counts_jax}
+    counts_jax   = jnp.array(counts, dtype=jnp.int32)
+    model_kwargs = {'counts': counts_jax}
     if delta is not None:
         model_kwargs['delta'] = jnp.array(delta, dtype=jnp.float32)
-    if delta_fields is not None:
-        model_kwargs['delta_fields'] = jnp.array(delta_fields, dtype=jnp.float32)
-    if s2 is not None:
-        model_kwargs['s2'] = jnp.array(s2, dtype=jnp.float32)
 
     mcmc = MCMC(NUTS(model), num_warmup=num_warmup,
                 num_samples=num_samples, progress_bar=True)
@@ -57,7 +45,8 @@ def run_nuts(model, counts, delta=None, delta_fields=None, s2=None,
         return samples
 
     log_liks = log_likelihood(model, samples, **model_kwargs)
-    log_lik  = np.array(log_liks['obs'].sum(-1))   # (n_samples,)
+    # log_lik  = np.array(log_liks['obs'].sum(-1))   # (n_samples,)
+    log_lik  = np.array(log_liks['obs'])   # (n_samples,)
     return samples, log_lik
 
 

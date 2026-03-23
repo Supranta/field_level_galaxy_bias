@@ -20,8 +20,8 @@ def neyrinck_model(r, n_bar, beta, delta_g):
     -------
     mu : array_like
     """
-    rho_g = 1.0 + delta_g
-    return n_bar * r ** beta * np.exp(-rho_g / r)
+    r_g = 1.0 + delta_g
+    return n_bar * r ** beta * np.exp(-r_g / r)
 
 
 def sigma_model(r, sigma1, gamma1, sigma2, gamma2):
