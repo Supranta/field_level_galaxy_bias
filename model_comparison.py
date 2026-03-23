@@ -27,10 +27,12 @@ def load_config(path):
 
 def model_label(cfg):
     """Human-readable label from config keys."""
-    mean   = cfg.get('mean_type',  '?')
-    z      = cfg.get('z_type',     '?')
-    sigma  = cfg.get('sigma_type', '?')
-    return 'mean=%s  z=%s  sigma=%s' % (mean, z, sigma)
+    fit = cfg.get('fit_model', {})
+    mean   = fit.get('mean_type',  '?')
+    z      = fit.get('z_type',     '?')
+    sigma  = fit.get('sigma_type', '?')
+    tidal  = fit.get('tidal_type', 'none')
+    return 'mean=%s  z=%s  sigma=%s  tidal=%s' % (mean, z, sigma, tidal)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -101,6 +103,11 @@ def main():
         'datafile mismatch:\n  config1: %s\n  config2: %s\n'
         'Model comparison requires both models to be fit on the same data.'
         % (cfg1['datafile'], cfg2['datafile'])
+    )
+    assert cfg1['catalog'] == cfg2['catalog'], (
+        'catalog mismatch:\n  config1: %s\n  config2: %s\n'
+        'Model comparison requires both models to be fit on the same catalog.'
+        % (cfg1['catalog'], cfg2['catalog'])
     )
 
     label1 = model_label(cfg1)

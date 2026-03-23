@@ -71,11 +71,19 @@ n_delta_bins: 10   # used only for plotting
 datafile: /path/to/data.h5
 savedir:  /path/to/output
 catalog:  catalog_name
-mean_type:  neyrinck
-z_type:     shared
-sigma_type: density
-num_warmup:  500   # optional
-num_samples: 500   # optional
+fit_model:
+  mean_type:  neyrinck
+  z_type:     shared
+  sigma_type: density
+  tidal_type: none
+  num_warmup:  500   # optional
+  num_samples: 500   # optional
+nested_model:        # optional; warms up the fit chain from a simpler model
+  mean_type:  neyrinck
+  z_type:     shared
+  sigma_type: density
+  tidal_type: none
+  num_warmup: 100
 ```
 
 ## Outputs

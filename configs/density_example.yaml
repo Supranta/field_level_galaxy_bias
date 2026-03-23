@@ -2,23 +2,31 @@
 # Parametric lognormal-Poisson fit: rate(delta) and sigma(delta) are
 # explicit functions of local matter density, fit over the full field.
 
-n_delta_bins: 10            # number of density bins used only for plotting
-
 datafile: /path/to/data.h5  # HDF5 file with delta_2d and <catalog>/Ng datasets
 savedir:  /path/to/output   # directory for samples and figures
 catalog:  catalog_name      # HDF5 group name for the galaxy catalog
 
-# Model variant — choose one option from each key:
-mean_type:  neyrinck        # 'neyrinck' | 'powerlaw'
-z_type:     shared          # 'shared' | 'zero'
-sigma_type: density         # 'density' | 'constant'  (ignored if z_type: zero)
-tidal_type: none            # 'none' | 's2'  (s2 adds b_s2 * s^2 to effective delta)
+n_delta_bins: 10            # number of density bins used only for plotting
 
-# NUTS tuning (optional)
-num_warmup:  500
-num_samples: 500
+# Full model to sample from:
+fit_model:
+  mean_type:  neyrinck      # 'neyrinck' | 'powerlaw'
+  z_type:     shared        # 'shared' | 'zero'
+  sigma_type: density       # 'density' | 'constant'  (ignored if z_type: zero)
+  tidal_type: none          # 'none' | 's2'
+  num_warmup:  500
+  num_samples: 500
+
+# Optional: run a simpler nested model first to warm-start the fit chain.
+# If omitted, the fit chain runs from scratch.
+# nested_model:
+#   mean_type:  neyrinck
+#   z_type:     shared
+#   sigma_type: density
+#   tidal_type: none
+#   num_warmup: 100         # kept small — only 1 posterior sample is drawn
 
 # Latent field diagnostics — plot_density.py only (all optional)
-box_size:      1000.  # physical box size in Mpc/h, used for k-space units
+box_size:      1000.  # physical box size in Mpc/h, used for k-space units and s2
 n_latent_bins: 10     # delta bins for the z-vs-density plot (defaults to n_delta_bins)
 n_k_bins:      20     # number of log-spaced k bins for power spectra

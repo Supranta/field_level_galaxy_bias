@@ -37,9 +37,10 @@ def main(config_path):
     datafile      = cfg['datafile']
     savedir       = cfg['savedir']
     catalog       = cfg['catalog']
-    mean_type     = cfg['mean_type']
-    z_type        = cfg['z_type']
-    sigma_type    = cfg.get('sigma_type')
+    fit_cfg       = cfg['fit_model']
+    mean_type     = fit_cfg['mean_type']
+    z_type        = fit_cfg['z_type']
+    sigma_type    = fit_cfg.get('sigma_type')
     box_size      = cfg.get('box_size', 1000.)
     n_latent_bins = cfg.get('n_latent_bins', n_delta_bins)
     n_k_bins      = cfg.get('n_k_bins', 20)
