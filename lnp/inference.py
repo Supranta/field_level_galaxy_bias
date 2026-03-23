@@ -4,7 +4,7 @@ import numpy as np
 from numpyro.infer import MCMC, NUTS, log_likelihood
 
 
-def run_nuts(model, counts, delta=None,
+def run_nuts(model, counts, delta=None, s2=None,
              num_warmup=500, num_samples=500,
              seed=42, compute_log_lik=False):
     """Run NUTS on a NumPyro model.
@@ -13,10 +13,12 @@ def run_nuts(model, counts, delta=None,
     ----------
     model : callable
         NumPyro model. Called as model(counts) if delta is None,
-        else model(counts, delta).
+        else model(counts, delta), or model(counts, delta, s2) if s2 is given.
     counts : (N_types, N_pix) array-like of int
     delta : (N_pix,) array-like of float, optional
         Matter overdensity field. Required for the density model.
+    s2 : (N_pix,) array-like of float, optional
+        Squared tidal field. Required when tidal_type='s2'.
     num_warmup : int
     num_samples : int
     seed : int
@@ -35,6 +37,8 @@ def run_nuts(model, counts, delta=None,
     model_kwargs = {'counts': counts_jax}
     if delta is not None:
         model_kwargs['delta'] = jnp.array(delta, dtype=jnp.float32)
+    if s2 is not None:
+        model_kwargs['s2'] = jnp.array(s2, dtype=jnp.float32)
 
     mcmc = MCMC(NUTS(model), num_warmup=num_warmup,
                 num_samples=num_samples, progress_bar=True)

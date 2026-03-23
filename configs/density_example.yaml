@@ -12,6 +12,7 @@ catalog:  catalog_name      # HDF5 group name for the galaxy catalog
 mean_type:  neyrinck        # 'neyrinck' | 'powerlaw'
 z_type:     shared          # 'shared' | 'zero'
 sigma_type: density         # 'density' | 'constant'  (ignored if z_type: zero)
+tidal_type: none            # 'none' | 's2'  (s2 adds b_s2 * s^2 to effective delta)
 
 # NUTS tuning (optional)
 num_warmup:  500

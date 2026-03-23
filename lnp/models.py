@@ -145,18 +145,29 @@ def _observe(rate, counts):
 # Density model (parametric) — shared body
 # ---------------------------------------------------------------------------
 
-def _density_model_body(counts, r, mean_type, z_type, sigma_type):
-    """Shared model body for both single-scale and multiscale variants.
+def _density_model_body(counts, r, mean_type, z_type, sigma_type,
+                        tidal_type='none', s2=None):
+    """Shared model body for all density model variants.
 
     Parameters
     ----------
     counts : (N_types, N_pix) int array
     r : (N_pix,) float array
-        Effective density ratio r_eff = 1 + delta_eff.
+        Base density ratio 1 + delta (tidal correction applied here if needed).
     mean_type, z_type, sigma_type : str
         Same semantics as in build_model.
+    tidal_type : {'none', 's2'}
+        Whether to apply a tidal bias correction to the effective density.
+    s2 : (N_pix,) float array or None
+        Squared tidal field. Required when tidal_type='s2'.
     """
     N_types, N_pix = counts.shape
+
+    if tidal_type == 's2':
+        assert s2 is not None, "s2 must be provided when tidal_type='s2'"
+        # b_s2 shifts the effective density: r_eff = 1 + delta + b_s2 * s2
+        b_s2 = numpyro.sample("b_s2", dist.Normal(0.0, 2.0))
+        r = r + b_s2 * s2
 
     r = jnp.clip(r, a_min=1e-6)
     
@@ -194,8 +205,8 @@ def _density_model_body(counts, r, mean_type, z_type, sigma_type):
 # Density model (parametric) — factory
 # ---------------------------------------------------------------------------
 
-def build_model(mean_type, z_type, sigma_type=None):
-    """Build a NumPyro model from three orthogonal design choices.
+def build_model(mean_type, z_type, sigma_type=None, tidal_type='none'):
+    """Build a NumPyro model from four orthogonal design choices.
 
     Parameters
     ----------
@@ -213,11 +224,17 @@ def build_model(mean_type, z_type, sigma_type=None):
         Ignored when z_type='zero'.
         - 'density'  : sigma(r) = S * (r^gamma1 + A_sigma * r^gamma2)
         - 'constant' : sigma is a per-type constant
+    tidal_type : {'none', 's2'}
+        Whether to include a tidal bias term in the effective density.
+        - 'none' : r_eff = 1 + delta  (no tidal correction)
+        - 's2'   : r_eff = 1 + delta + b_s2 * s2, with b_s2 ~ Normal(0, 2)
 
     Returns
     -------
     model : callable
-        NumPyro model with signature model(counts, delta).
+        NumPyro model with signature:
+        - model(counts, delta)        when tidal_type='none'
+        - model(counts, delta, s2)    when tidal_type='s2'
     """
     if mean_type not in ('neyrinck', 'powerlaw'):
         raise ValueError("mean_type must be 'neyrinck' or 'powerlaw', got '%s'" % mean_type)
@@ -225,8 +242,15 @@ def build_model(mean_type, z_type, sigma_type=None):
         raise ValueError("z_type must be 'shared' or 'zero', got '%s'" % z_type)
     if z_type != 'zero' and sigma_type not in ('density', 'constant'):
         raise ValueError("sigma_type must be 'density' or 'constant', got '%s'" % sigma_type)
+    if tidal_type not in ('none', 's2'):
+        raise ValueError("tidal_type must be 'none' or 's2', got '%s'" % tidal_type)
 
-    def model(counts, delta):
-        _density_model_body(counts, 1.0 + delta, mean_type, z_type, sigma_type)
+    if tidal_type == 's2':
+        def model(counts, delta, s2):
+            _density_model_body(counts, 1.0 + delta, mean_type, z_type, sigma_type,
+                                tidal_type='s2', s2=s2)
+    else:
+        def model(counts, delta):
+            _density_model_body(counts, 1.0 + delta, mean_type, z_type, sigma_type)
 
     return model
