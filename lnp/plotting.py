@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.cm as mcm
 from matplotlib import cm
 from getdist import MCSamples
 import getdist.plots as gdplots
@@ -131,6 +132,176 @@ def plot_getdist_contours(data_matrix, names, labels, savepath):
     g.triangle_plot([mc_samples], filled=True)
     g.export(savepath)
     plt.close('all')
+
+
+def _normalize(x):
+    return (x - x.mean()) / x.std()
+
+
+def plot_latent_vs_density(ax, r_axis, z_mean_arr, z_std_arr, n_pix_arr):
+    """Two-panel plot: posterior mean z and sigma_z vs log(1+delta).
+
+    Parameters
+    ----------
+    ax          : (2,) array of Axes
+    r_axis      : (n_bins,) ndarray — log(1 + delta_mean) per bin
+    z_mean_arr  : (n_bins,) ndarray — pixel-avg posterior mean of z per bin
+    z_std_arr   : (n_bins,) ndarray — pixel-avg posterior std dev of z per bin
+    n_pix_arr   : (n_bins,) int array — pixel count per bin (for std-of-std error bars)
+    """
+    ax[0].set_ylabel(r'$\bar{z}$')
+    ax[0].set_xlabel(r'$\log(1 + \delta)$')
+    ax[0].errorbar(r_axis, z_mean_arr, z_std_arr,
+                   color='k', fmt='o', markerfacecolor='white', capsize=5.)
+    ax[0].axhline( 1., color='k', ls=':')
+    ax[0].axhline(-1., color='k', ls=':')
+
+    ax[1].set_ylabel(r'$\sigma_z$')
+    ax[1].set_xlabel(r'$\log(1 + \delta)$')
+    ax[1].axhline(1., color='r', ls='--', label='Prior std')
+    ax[1].errorbar(r_axis, z_std_arr, z_std_arr / np.sqrt(n_pix_arr),
+                   color='k', fmt='o', markerfacecolor='white', capsize=5.)
+    ax[1].legend()
+
+
+def plot_latent_power_spectra(ax, k_centres,
+                              log_pk_mean, log_pk_std,
+                              log_pk_prior_mean, log_pk_prior_std):
+    """Fill a (n_rows, 4) axes grid with per-slab log P(k) vs k.
+
+    Posterior is shown in red with shaded 1-sigma band; white-noise prior in blue.
+
+    Parameters
+    ----------
+    ax                : (n_rows, 4) array of Axes (or (4,) for a single row)
+    k_centres         : (n_k_bins,) ndarray
+    log_pk_mean       : (N_slabs, n_k_bins) ndarray — posterior mean
+    log_pk_std        : (N_slabs, n_k_bins) ndarray
+    log_pk_prior_mean : (n_k_bins,) ndarray — white-noise reference
+    log_pk_prior_std  : (n_k_bins,) ndarray
+    """
+    ax_flat = np.array(ax).flatten()
+    N_slabs = log_pk_mean.shape[0]
+    for s in range(N_slabs):
+        a = ax_flat[s]
+        a.set_title('Slab %d' % (s + 1))
+        a.set_ylabel(r'$\ln P(k)$')
+        a.set_xlabel(r'$k$')
+        a.semilogx(k_centres, log_pk_mean[s], color='r', label='Posterior')
+        a.fill_between(k_centres,
+                       log_pk_mean[s] - log_pk_std[s],
+                       log_pk_mean[s] + log_pk_std[s],
+                       color='r', alpha=0.3)
+        a.semilogx(k_centres, log_pk_prior_mean, color='b', label='Prior')
+        a.fill_between(k_centres,
+                       log_pk_prior_mean - log_pk_prior_std,
+                       log_pk_prior_mean + log_pk_prior_std,
+                       color='b', alpha=0.3)
+    ax_flat[0].legend()
+
+    # Hide unused panels
+    for s in range(N_slabs, len(ax_flat)):
+        ax_flat[s].axis('off')
+
+
+def plot_combined_crosscorr_spectra(ax, k_centres, rho_c_mean, rho_c_std,
+                                    rho_c_resid_mean=None, rho_c_resid_std=None,
+                                    cmap_name='cividis'):
+    """Fill a (n_rows, 4) axes grid with per-slab rho_c(k) diagnostics.
+
+    Each panel shows:
+      - Latent-delta rho_c: posterior mean as a red line with shaded 1-sigma band.
+      - Residual-delta rho_c: one line + shaded band per galaxy type, coloured by
+        a continuous colormap (optional).
+
+    Parameters
+    ----------
+    ax               : (n_rows, 4) array of Axes (or (4,) for a single row)
+    k_centres        : (n_k_bins,) ndarray
+    rho_c_mean       : (N_slabs, n_k_bins) ndarray  — latent posterior mean
+    rho_c_std        : (N_slabs, n_k_bins) ndarray  — latent posterior std
+    rho_c_resid_mean : (N_types, N_slabs, n_k_bins) ndarray or None
+    rho_c_resid_std  : (N_types, N_slabs, n_k_bins) ndarray or None
+    cmap_name        : str  — matplotlib colormap for galaxy types
+    """
+    ax_flat = np.array(ax).flatten()
+    N_slabs = rho_c_mean.shape[0]
+    HAS_RESID = rho_c_resid_mean is not None
+    N_types   = rho_c_resid_mean.shape[0] if HAS_RESID else 0
+    cmap      = mcm.get_cmap(cmap_name)
+    colors    = [cmap(t / max(N_types + 1, 1)) for t in range(N_types)]
+
+    for s in range(N_slabs):
+        a = ax_flat[s]
+        a.set_title('Slab %d' % (s + 1))
+        a.set_ylabel(r'$\rho_c(k)$')
+        a.set_xlabel(r'$k$')
+        a.set_ylim(-1.,1.)
+
+        a.semilogx(k_centres, rho_c_mean[s], color='r', label='Latent z')
+        a.fill_between(k_centres,
+                       rho_c_mean[s] - rho_c_std[s],
+                       rho_c_mean[s] + rho_c_std[s],
+                       color='r', alpha=0.25)
+
+        if HAS_RESID:
+            for t in range(N_types):
+                a.semilogx(k_centres, rho_c_resid_mean[t, s],
+                           color=colors[t], label='Type %d residual' % (t + 1))
+                if rho_c_resid_std is not None:
+                    a.fill_between(
+                        k_centres,
+                        rho_c_resid_mean[t, s] - rho_c_resid_std[t, s],
+                        rho_c_resid_mean[t, s] + rho_c_resid_std[t, s],
+                        color=colors[t], alpha=0.2,
+                    )
+
+    ax_flat[0].legend(fontsize=7)
+
+    for s in range(N_slabs, len(ax_flat)):
+        ax_flat[s].axis('off')
+
+
+def plot_latent_crosscorr_spectra(ax, k_centres, rho_c_mean, rho_c_std):
+    """Fill a (n_rows, 4) axes grid with per-slab rho_c(k) between z and delta.
+
+    Parameters
+    ----------
+    ax         : (n_rows, 4) array of Axes (or (4,) for a single row)
+    k_centres  : (n_k_bins,) ndarray
+    rho_c_mean : (N_slabs, n_k_bins) ndarray
+    rho_c_std  : (N_slabs, n_k_bins) ndarray
+    """
+    plot_combined_crosscorr_spectra(ax, k_centres, rho_c_mean, rho_c_std)
+
+
+def plot_latent_maps(ax, delta_slab, z_mean_map, z_std_map, n_show=4):
+    """Fill a (3, n_show) axes grid with delta, mean-z, and std-z map images.
+
+    Row 0: matter overdensity delta.
+    Row 1: posterior mean of the latent field z.
+    Row 2: posterior std dev of the latent field z.
+
+    Parameters
+    ----------
+    ax          : (3, n_show) array of Axes
+    delta_slab  : (N_slabs, H, W) ndarray
+    z_mean_map  : (N_slabs, H, W) ndarray — MCMC mean of z
+    z_std_map   : (N_slabs, H, W) ndarray — MCMC std of z
+    n_show      : int — number of slabs to display (default 4)
+    """
+    for i in range(n_show):
+        ax[0, i].set_title(r'$\delta$ (Slab %d)' % (i + 1))
+        ax[1, i].set_title(r'$\langle z \rangle$ (Slab %d)' % (i + 1))
+        ax[2, i].set_title(r'$\sigma_z$ (Slab %d)' % (i + 1))
+
+        for row in range(3):
+            ax[row, i].set_xticks([])
+            ax[row, i].set_yticks([])
+
+        ax[0, i].imshow(_normalize(delta_slab[i]),  vmin=-1.5, vmax=2.5)
+        ax[1, i].imshow(_normalize(z_mean_map[i]),  vmin=-1.5, vmax=1.5)
+        ax[2, i].imshow(z_std_map[i], vmin=0.1, vmax=0.5)
 
 
 def plot_corrcoef_matrix(rho_c_data, rho_c_model, N_types, savepath):

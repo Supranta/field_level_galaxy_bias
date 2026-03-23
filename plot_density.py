@@ -19,35 +19,39 @@ import matplotlib.pyplot as plt
 import yaml
 from tqdm import trange
 
-from lnp.data import (load_data, compute_smoothed_fields, compute_tidal_field,
-                      compute_delta_bins, compute_delta_mean)
+from lnp.data import load_data, compute_delta_bins, compute_delta_mean
 from lnp.density_functions import neyrinck_model_jax, sigma_model_jax
 from lnp.plotting import (plot_mean_variance_sigma, plot_crosscorr_vs_density,
-                          plot_getdist_contours)
+                          plot_getdist_contours, plot_latent_vs_density,
+                          plot_latent_power_spectra, plot_combined_crosscorr_spectra,
+                          plot_latent_maps)
+from lnp.power_spectrum import (make_k_bins, compute_latent_power_spectra,
+                                 compute_residual_crosscorr_spectra)
 
 
 def main(config_path):
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
 
-    n_delta_bins     = cfg['n_delta_bins']
-    datafile         = cfg['datafile']
-    savedir          = cfg['savedir']
-    catalog          = cfg['catalog']
-    mean_type        = cfg['mean_type']
-    z_type           = cfg['z_type']
-    sigma_type       = cfg.get('sigma_type')
-    smoothing_scales = cfg.get('smoothing_scales')
-    box_size         = cfg.get('box_size')
-    tidal            = cfg.get('tidal', False)
-
-    multiscale = smoothing_scales is not None
+    n_delta_bins  = cfg['n_delta_bins']
+    datafile      = cfg['datafile']
+    savedir       = cfg['savedir']
+    catalog       = cfg['catalog']
+    mean_type     = cfg['mean_type']
+    z_type        = cfg['z_type']
+    sigma_type    = cfg.get('sigma_type')
+    box_size      = cfg.get('box_size', 1000.)
+    n_latent_bins = cfg.get('n_latent_bins', n_delta_bins)
+    n_k_bins      = cfg.get('n_k_bins', 20)
 
     HAS_Z             = z_type != 'zero'
     HAS_DENSITY_SIGMA = HAS_Z and sigma_type == 'density'
     HAS_NEYRINCK_MEAN = mean_type == 'neyrinck'
 
     delta_slab, Ng = load_data(datafile, catalog)
+    N_slabs, H, W  = delta_slab.shape
+    assert H == W, "Field2D requires a square grid; got H=%d, W=%d" % (H, W)
+    N_grid     = H
     N_types    = Ng.shape[0]
     delta_flat = delta_slab.flatten()   # unsmoothed — always used for bin x-axis
     Ng_flat    = Ng.reshape(N_types, -1)
@@ -57,28 +61,9 @@ def main(config_path):
     samples = {k: np.array(v) for k, v in samples.items()}
     n_mcmc  = samples['n_bar'].shape[0]
 
-    print("Model:   mean=%s  z=%s  sigma=%s  multiscale=%s  tidal=%s"
-          % (mean_type, z_type, sigma_type, multiscale, tidal))
+    print("Model:   mean=%s  z=%s  sigma=%s" % (mean_type, z_type, sigma_type))
 
-    # ---- Effective density for model evaluation ----
-    # Use posterior-mean weights/parameters to form a single delta_eff field.
-    # Binning (x-axis) always uses unsmoothed delta.
-    if multiscale:
-        delta_fields = compute_smoothed_fields(delta_slab, smoothing_scales, box_size)
-        N_scales_total    = delta_fields.shape[0]
-        delta_fields_flat = delta_fields.reshape(N_scales_total, -1)  # (N_scales+1, N_pix)
-        A_mean     = np.concatenate([[samples['A_0'].mean()],
-                                     samples['A_smooth'].mean(0)])    # (N_scales+1,)
-        delta_eff_flat = A_mean @ delta_fields_flat                   # (N_pix,)
-    else:
-        delta_eff_flat = delta_flat
-
-    if tidal:
-        s2_flat        = compute_tidal_field(delta_slab, box_size).flatten()
-        b_s2_mean      = float(samples['b_s2'].mean())
-        delta_eff_flat = delta_eff_flat + b_s2_mean * s2_flat
-
-    r_flat = 1.0 + delta_eff_flat
+    r_flat = 1.0 + delta_flat
     print("N_types: %d,  n_mcmc: %d" % (N_types, n_mcmc))
 
     delta_bins = compute_delta_bins(delta_flat, n_delta_bins)
@@ -199,17 +184,6 @@ def main(config_path):
             labels.append(latex)
             columns.append(samples[key])
 
-    if multiscale:
-        for i, scale in enumerate(smoothing_scales):
-            names.append('A_smooth_%d' % i)
-            labels.append('A_{%g}' % scale)
-            columns.append(samples['A_smooth'][:, i])
-
-    if tidal:
-        names.append('b_s2')
-        labels.append('b_{s^2}')
-        columns.append(samples['b_s2'])
-
     data_matrix = np.column_stack(columns)
     savepath = savedir + '/figs/param_contours.png'
     plot_getdist_contours(data_matrix, names, labels, savepath)
@@ -259,6 +233,136 @@ def main(config_path):
     plt.savefig(savepath, dpi=150.)
     plt.close()
     print("Saved:", savepath)
+
+    # ---- Plots 4–7: latent field diagnostics (only when latent z exists) ----
+    def _plot_latent_diagnostics():
+        """Compute and save four diagnostic figures for the posterior latent z field."""
+        z_samples = samples['z']   # (n_mcmc, N_pix)
+
+        # -- Plot 4: z mean and std vs delta --
+        latent_bins       = compute_delta_bins(delta_flat, n_latent_bins)
+        latent_delta_mean = compute_delta_mean(delta_flat, latent_bins)
+        r_latent_axis     = np.log(1.0 + latent_delta_mean)
+
+        z_mean_arr = np.empty(n_latent_bins)
+        z_std_arr  = np.empty(n_latent_bins)
+        n_pix_arr  = np.empty(n_latent_bins, dtype=int)
+        for b in range(n_latent_bins):
+            mask          = (delta_flat > latent_bins[b]) & (delta_flat <= latent_bins[b + 1])
+            z_in_bin      = z_samples[:, mask]        # (n_mcmc, n_pix_bin)
+            z_mean_arr[b] = z_in_bin.mean(0).mean()   # pixel-avg then sample-avg
+            z_std_arr[b]  = z_in_bin.std(0).mean()    # pixel-avg posterior std dev
+            n_pix_arr[b]  = mask.sum()
+
+        fig, ax = plt.subplots(1, 2, figsize=(10., 3.5))
+        plt.suptitle("Latent field z vs density")
+        plot_latent_vs_density(ax, r_latent_axis, z_mean_arr, z_std_arr, n_pix_arr)
+        plt.tight_layout()
+        savepath = savedir + '/figs/latent_vs_density.png'
+        plt.savefig(savepath, dpi=150.)
+        plt.close()
+        print("Saved:", savepath)
+
+        # -- Spectral quantities (expensive per-sample loop) --
+        print("Computing latent field power spectra...")
+        (k_centres,
+         log_pk_mean, log_pk_std,
+         log_pk_prior_mean, log_pk_prior_std,
+         rho_c_mean, rho_c_std) = compute_latent_power_spectra(
+            z_samples, delta_slab, N_grid,
+            box_size=box_size, n_k_bins=n_k_bins,
+        )
+
+        # -- Residual cross-correlation with delta --
+        # For each MCMC sample: compute rate_i, form residual_i = rate_i - Ng,
+        # compute rho_c(k) for that sample, accumulate. This mirrors how the
+        # latent spectra are computed and yields mean + uncertainty.
+        print("Computing per-sample residual cross-correlation spectra...")
+        N_pix              = delta_flat.shape[0]
+        r_3d               = r_flat[None, None, :]   # (1, 1, N_pix)
+        field, k_bins      = make_k_bins(N_grid, box_size, n_k_bins)
+        rho_c_resid_samples = np.empty((n_mcmc, N_types, N_slabs, n_k_bins))
+
+        for i in trange(n_mcmc, desc="Residual spectra"):
+            si = {k: v[i:i+1] for k, v in samples.items()}
+
+            if HAS_NEYRINCK_MEAN:
+                dg = si['delta_g']
+                dg = dg[:, None, None] if dg.ndim == 1 else dg[:, :, None]
+                mu = np.array(neyrinck_model_jax(
+                    r_3d, si['n_bar'][:, :, None], si['beta'][:, :, None], dg
+                ))
+            else:
+                mu = si['n_bar'][:, :, None] * r_3d ** si['beta'][:, :, None]
+
+            if HAS_DENSITY_SIGMA:
+                sigma = np.array(sigma_model_jax(
+                    r_3d,
+                    si['S'][:, :, None],
+                    si['gamma1'][:, None, None],
+                    si['gamma2'][:, None, None],
+                    si['A_sigma'][:, None, None],
+                ))
+            else:
+                sigma = si['sigma'][:, :, None] * np.ones((1, 1, N_pix))
+
+            # mu, sigma both (1, N_types, N_pix); z_samples[i] is (N_pix,)
+            lam        = np.exp(sigma[0] * z_samples[i] - 0.5 * sigma[0] ** 2)
+            rate_i     = mu[0] * lam                              # (N_types, N_pix)
+            residual_i = Ng_flat - rate_i                        # (N_types, N_pix)
+            resid_map_i = residual_i.reshape(N_types, N_slabs, N_grid, N_grid)
+
+            _, rho_c_i = compute_residual_crosscorr_spectra(
+                resid_map_i, delta_slab, field, k_bins
+            )
+            rho_c_resid_samples[i] = rho_c_i
+
+        rho_c_resid_mean = rho_c_resid_samples.mean(0)   # (N_types, N_slabs, n_k_bins)
+        rho_c_resid_std  = rho_c_resid_samples.std(0)
+
+        n_show = min(8, N_slabs)
+        n_rows = (n_show + 3) // 4   # 1 or 2 rows of 4 panels
+
+        # -- Plot 5: per-slab latent power spectra --
+        fig, ax = plt.subplots(n_rows, 4, figsize=(10., 5. * n_rows))
+        plot_latent_power_spectra(ax, k_centres,
+                                  log_pk_mean[:n_show], log_pk_std[:n_show],
+                                  log_pk_prior_mean, log_pk_prior_std)
+        plt.tight_layout()
+        savepath = savedir + '/figs/latent_power_spectra.png'
+        plt.savefig(savepath, dpi=150.)
+        plt.close()
+        print("Saved:", savepath)
+
+        # -- Plot 6: per-slab cross-correlation with delta (latent + residual) --
+        fig, ax = plt.subplots(n_rows, 4, figsize=(14., 5. * n_rows))
+        plot_combined_crosscorr_spectra(
+            ax, k_centres,
+            rho_c_mean[:n_show], rho_c_std[:n_show],
+            rho_c_resid_mean=rho_c_resid_mean[:, :n_show, :],
+            rho_c_resid_std=rho_c_resid_std[:, :n_show, :],
+        )
+        plt.tight_layout()
+        savepath = savedir + '/figs/latent_crosscorr_spectra.png'
+        plt.savefig(savepath, dpi=150.)
+        plt.close()
+        print("Saved:", savepath)
+
+        # -- Plot 7: 2D map images of delta, mean z, std z --
+        z_mean_map  = z_samples.mean(0).reshape(N_slabs, H, W)
+        z_std_map   = z_samples.std(0).reshape(N_slabs, H, W)
+        n_show_maps = min(4, N_slabs)
+        fig, ax = plt.subplots(3, n_show_maps, figsize=(10., 8.5))
+        plot_latent_maps(ax, delta_slab, z_mean_map, z_std_map, n_show=n_show_maps)
+        plt.tight_layout()
+        savepath = savedir + '/figs/latent_maps.png'
+        plt.savefig(savepath, dpi=150.)
+        plt.close()
+        print("Saved:", savepath)
+
+    if HAS_Z:
+        print("Plotting latent field diagnostics...")
+        _plot_latent_diagnostics()
 
 if __name__ == '__main__':
     if len(sys.argv) != 2:

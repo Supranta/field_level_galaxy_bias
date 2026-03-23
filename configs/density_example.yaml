@@ -16,3 +16,8 @@ sigma_type: density         # 'density' | 'constant'  (ignored if z_type: zero)
 # NUTS tuning (optional)
 num_warmup:  500
 num_samples: 500
+
+# Latent field diagnostics — plot_density.py only (all optional)
+box_size:      1000.  # physical box size in Mpc/h, used for k-space units
+n_latent_bins: 10     # delta bins for the z-vs-density plot (defaults to n_delta_bins)
+n_k_bins:      20     # number of log-spaced k bins for power spectra
