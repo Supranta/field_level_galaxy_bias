@@ -2,32 +2,52 @@
 
 Fits a model where the mean galaxy count and lognormal scatter are explicit
 parametric functions of the local matter density delta. All pixels are fit
-simultaneously in a single MCMC run.
+simultaneously in a single MCMC or MAP run.
 
-Config format uses nested fit_model / nested_model blocks:
+Config format
+-------------
+Top-level keys:
+
+    inference_mode: sample | optimize   # default: sample
 
     fit_model:
       mean_type:  neyrinck | powerlaw
       z_type:     shared   | zero
       sigma_type: density  | constant
-      tidal_type: none     | s2
+      tidal_type: none     | s2 | s2_per_type
+
+      # sampling (inference_mode: sample)
       num_warmup:  500
       num_samples: 500
 
-    nested_model:             # optional; if absent, runs fit_model directly
+      # optimisation (inference_mode: optimize)
+      num_steps:    5000
+      learning_rate: 0.01
+
+    nested_model:             # optional; warms up the fit from a simpler model
       mean_type:  ...
       z_type:     ...
       sigma_type: ...
       tidal_type: none
+
+      # sampling
       num_warmup: 100         # kept small — only 1 sample drawn
 
-When nested_model is present, run_nuts_with_warmstart is used: a short nested
-chain provides the initial parameter values for the fit chain.
+      # optimisation
+      num_steps:    2000
+      learning_rate: 0.01
+
+When nested_model is present:
+  - sample mode  : run_nuts_with_warmstart — short nested MCMC chain seeds the fit chain.
+  - optimize mode: run_map_with_warmstart  — nested MAP result seeds the fit optimisation.
 
 Outputs
 -------
-<savedir>/samples.pkl          MCMC posterior samples.
-<savedir>/log_likelihood.npy   Per-sample log-likelihood.
+<savedir>/samples.pkl          Posterior samples (sample mode) or MAP point
+                               estimate with a size-1 leading batch dimension
+                               (optimize mode).
+<savedir>/log_likelihood.npy   Shape (n_samples, n_pixels) for sample mode,
+                               (1, n_pixels) for optimize mode.
 
 Usage
 -----
@@ -44,7 +64,8 @@ import yaml
 
 from lnp.data import load_data
 from lnp.models import build_model
-from lnp.inference import run_nuts, run_nuts_with_warmstart
+from lnp.inference import (run_nuts, run_nuts_with_warmstart,
+                           run_map, run_map_with_warmstart)
 from lnp.power_spectrum import Field2D
 
 
@@ -76,15 +97,18 @@ def main(config_path):
     catalog    = cfg['catalog']
     fit_cfg    = cfg['fit_model']
     nested_cfg = cfg.get('nested_model')
+    mode       = cfg.get('inference_mode', 'sample')
 
-    fit_kwargs  = _parse_model_block(fit_cfg)
-    fit_warmup  = fit_cfg.get('num_warmup',  500)
-    fit_samples = fit_cfg.get('num_samples', 500)
+    assert mode in ('sample', 'optimize'), (
+        "inference_mode must be 'sample' or 'optimize', got '%s'" % mode)
+
+    fit_kwargs = _parse_model_block(fit_cfg)
 
     delta_slab, Ng = load_data(datafile, catalog)
     N_types = Ng.shape[0]
     Ng_flat = Ng.reshape(N_types, -1)
 
+    print("inference_mode: %s" % mode)
     print("Fit model: mean=%s  z=%s  sigma=%s  tidal=%s"
           % (fit_kwargs['mean_type'], fit_kwargs['z_type'],
              fit_kwargs['sigma_type'], fit_kwargs['tidal_type']))
@@ -95,37 +119,67 @@ def main(config_path):
                  nested_kwargs['sigma_type'], nested_kwargs['tidal_type']))
     print("N_types: %d,  N_pix: %d" % (N_types, Ng_flat.shape[1]))
 
-    needs_s2 = fit_kwargs['tidal_type'] == 's2'
-
-    s2_flat = None
+    needs_s2 = fit_kwargs['tidal_type'] in ('s2', 's2_per_type')
+    s2_flat  = None
     if needs_s2:
         box_size = cfg.get('box_size', 1000.)
         print("Computing tidal field s2 (box_size=%.1f)..." % box_size)
         s2_flat = _compute_s2_flat(delta_slab, box_size)
 
-    fit_model  = build_model(**fit_kwargs)
+    fit_model = build_model(**fit_kwargs)
     os.makedirs(savedir, exist_ok=True)
+    n_tidal   = N_types if fit_kwargs['tidal_type'] == 's2_per_type' else 1
 
-    print("Running NUTS...")
-    if nested_cfg is None:
-        samples, log_lik = run_nuts(
-            fit_model, Ng_flat,
-            delta=delta_slab.flatten(),
-            s2=s2_flat,
-            num_warmup=fit_warmup, num_samples=fit_samples,
-            compute_log_lik=True,
-        )
-    else:
-        nested_model  = build_model(**nested_kwargs)
-        nested_warmup = nested_cfg.get('num_warmup', 100)
-        samples, log_lik = run_nuts_with_warmstart(
-            nested_model, fit_model,
-            Ng_flat, delta_slab.flatten(),
-            s2=s2_flat,
-            nested_warmup=nested_warmup,
-            num_warmup=fit_warmup, num_samples=fit_samples,
-            compute_log_lik=True,
-        )
+    if mode == 'sample':
+        fit_warmup  = fit_cfg.get('num_warmup',  500)
+        fit_samples = fit_cfg.get('num_samples', 500)
+        print("Running NUTS...")
+        if nested_cfg is None:
+            samples, log_lik = run_nuts(
+                fit_model, Ng_flat,
+                delta=delta_slab.flatten(),
+                s2=s2_flat,
+                num_warmup=fit_warmup, num_samples=fit_samples,
+                compute_log_lik=True,
+            )
+        else:
+            nested_model  = build_model(**nested_kwargs)
+            nested_warmup = nested_cfg.get('num_warmup', 100)
+            samples, log_lik = run_nuts_with_warmstart(
+                nested_model, fit_model,
+                Ng_flat, delta_slab.flatten(),
+                s2=s2_flat,
+                nested_warmup=nested_warmup,
+                num_warmup=fit_warmup, num_samples=fit_samples,
+                compute_log_lik=True,
+                n_tidal_params=n_tidal,
+            )
+
+    else:  # optimize
+        fit_steps = fit_cfg.get('num_steps',     5000)
+        fit_lr    = fit_cfg.get('learning_rate', 0.01)
+        print("Running MAP optimisation...")
+        if nested_cfg is None:
+            samples, log_lik = run_map(
+                fit_model, Ng_flat,
+                delta=delta_slab.flatten(),
+                s2=s2_flat,
+                num_steps=fit_steps, learning_rate=fit_lr,
+                compute_log_lik=True,
+            )
+        else:
+            nested_model  = build_model(**nested_kwargs)
+            nested_steps  = nested_cfg.get('num_steps',     2000)
+            nested_lr     = nested_cfg.get('learning_rate', 0.01)
+            samples, log_lik = run_map_with_warmstart(
+                nested_model, fit_model,
+                Ng_flat, delta_slab.flatten(),
+                s2=s2_flat,
+                nested_steps=nested_steps, nested_lr=nested_lr,
+                num_steps=fit_steps, learning_rate=fit_lr,
+                compute_log_lik=True,
+                n_tidal_params=n_tidal,
+            )
 
     savepath = savedir + '/samples.pkl'
     with open(savepath, 'wb') as f:

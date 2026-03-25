@@ -25,14 +25,20 @@ def load_config(path):
         return yaml.safe_load(f)
 
 
+def inference_mode(cfg):
+    """Return 'sample' or 'optimize' from the top-level config key."""
+    return cfg.get('inference_mode', 'sample')
+
+
 def model_label(cfg):
     """Human-readable label from config keys."""
-    fit = cfg.get('fit_model', {})
-    mean   = fit.get('mean_type',  '?')
-    z      = fit.get('z_type',     '?')
-    sigma  = fit.get('sigma_type', '?')
-    tidal  = fit.get('tidal_type', 'none')
-    return 'mean=%s  z=%s  sigma=%s  tidal=%s' % (mean, z, sigma, tidal)
+    fit  = cfg.get('fit_model', {})
+    mean  = fit.get('mean_type',  '?')
+    z     = fit.get('z_type',     '?')
+    sigma = fit.get('sigma_type', '?')
+    tidal = fit.get('tidal_type', 'none')
+    mode  = inference_mode(cfg)
+    return 'mean=%s  z=%s  sigma=%s  tidal=%s  mode=%s' % (mean, z, sigma, tidal, mode)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -124,24 +130,23 @@ def main():
         % (log_like1.shape[1], log_like2.shape[1])
     )
 
-    waic1, lppd1, p1 = compute_waic(log_like1)
-    waic2, lppd2, p2 = compute_waic(log_like2)
+    is_map1 = log_like1.shape[0] == 1
+    is_map2 = log_like2.shape[0] == 1
+    NA      = '           N/A'
 
-    log_ev1 = compute_log_evidence_harmonic_mean(log_like1)
-    log_ev2 = compute_log_evidence_harmonic_mean(log_like2)
+    max_lkl1 = log_like1.sum(axis=1).max()
+    max_lkl2 = log_like2.sum(axis=1).max()
 
-    mean_lkl1 = log_like1.sum(axis=1).mean()
-    mean_lkl2 = log_like2.sum(axis=1).mean()
-    max_lkl1  = log_like1.sum(axis=1).max()
-    max_lkl2  = log_like2.sum(axis=1).max()
+    if not is_map1:
+        waic1, lppd1, p1 = compute_waic(log_like1)
+        log_ev1           = compute_log_evidence_harmonic_mean(log_like1)
+        mean_lkl1         = log_like1.sum(axis=1).mean()
+    if not is_map2:
+        waic2, lppd2, p2 = compute_waic(log_like2)
+        log_ev2           = compute_log_evidence_harmonic_mean(log_like2)
+        mean_lkl2         = log_like2.sum(axis=1).mean()
 
-    # Express everything as deltas relative to the better model.
-    delta_waic    = waic2    - waic1       # negative = model 2 better
-    delta_log_ev  = log_ev2  - log_ev1     # positive = model 2 better
-    delta_mean_lkl = mean_lkl2 - mean_lkl1
-    delta_max_lkl  = max_lkl2  - max_lkl1
-
-    col = 60
+    col = 65
     print('=' * col)
     print('MODEL COMPARISON')
     print('=' * col)
@@ -151,29 +156,57 @@ def main():
     print('-' * col)
     print('  n_samples  : %d  /  %d' % (log_like1.shape[0], log_like2.shape[0]))
     print('  n_pixels   : %d' % log_like1.shape[1])
+    if is_map1 or is_map2:
+        print('  NOTE: Bayesian metrics (WAIC, log evidence, mean log-lik) require')
+        print('        multiple samples and are unavailable for MAP (optimize) runs.')
     print('=' * col)
     print('  Metric                    Model 1      Model 2      Delta (2-1)')
     print('-' * col)
-    print('  WAIC                 %12.2f %12.2f %12.2f'  % (waic1, waic2, delta_waic))
-    print('  LPPD                 %12.2f %12.2f %12.2f'  % (lppd1, lppd2, lppd2 - lppd1))
-    print('  p_WAIC               %12.2f %12.2f %12.2f'  % (p1,    p2,    p2 - p1))
-    print('  Log evidence (HM)    %12.2f %12.2f %12.2f'  % (log_ev1, log_ev2, delta_log_ev))
-    print('  Mean log-likelihood  %12.2f %12.2f %12.2f'  % (mean_lkl1, mean_lkl2, delta_mean_lkl))
-    print('  Max  log-likelihood  %12.2f %12.2f %12.2f'  % (max_lkl1,  max_lkl2,  delta_max_lkl))
+
+    def _fmt(v1, v2):
+        s1 = '%12.2f' % v1 if v1 is not None else NA
+        s2 = '%12.2f' % v2 if v2 is not None else NA
+        sd = '%12.2f' % (v2 - v1) if (v1 is not None and v2 is not None) else NA
+        return s1, s2, sd
+
+    w1 = waic1     if not is_map1 else None
+    w2 = waic2     if not is_map2 else None
+    l1 = lppd1     if not is_map1 else None
+    l2 = lppd2     if not is_map2 else None
+    p1_ = p1       if not is_map1 else None
+    p2_ = p2       if not is_map2 else None
+    e1 = log_ev1   if not is_map1 else None
+    e2 = log_ev2   if not is_map2 else None
+    m1 = mean_lkl1 if not is_map1 else None
+    m2 = mean_lkl2 if not is_map2 else None
+
+    print('  WAIC                 %s %s %s' % _fmt(w1, w2))
+    print('  LPPD                 %s %s %s' % _fmt(l1, l2))
+    print('  p_WAIC               %s %s %s' % _fmt(p1_, p2_))
+    print('  Log evidence (HM)    %s %s %s' % _fmt(e1, e2))
+    print('  Mean log-likelihood  %s %s %s' % _fmt(m1, m2))
+    print('  Max  log-likelihood  %s %s %s' % _fmt(max_lkl1, max_lkl2))
     print('=' * col)
     print()
 
-    # Verdict: lower WAIC wins; higher log evidence wins.
-    waic_winner = 'Model 1' if waic1 < waic2 else 'Model 2'
-    ev_winner   = 'Model 1' if log_ev1 > log_ev2 else 'Model 2'
-    print('  WAIC favours         : %s  (delta = %+.2f)' % (waic_winner, delta_waic))
-    print('  Log evidence favours : %s  (delta = %+.2f)' % (ev_winner,   delta_log_ev))
-    print()
-    print('  Interpretation of |delta log evidence|:')
-    print('    < 1  : not worth more than a bare mention')
-    print('    1-3  : positive evidence')
-    print('    3-5  : strong evidence')
-    print('    > 5  : very strong evidence')
+    # Verdicts — only for metrics available for both models.
+    delta_max_lkl = max_lkl2 - max_lkl1
+    max_winner    = 'Model 1' if max_lkl1 > max_lkl2 else 'Model 2'
+    print('  Max log-lik favours  : %s  (delta = %+.2f)' % (max_winner, delta_max_lkl))
+
+    if not is_map1 and not is_map2:
+        delta_waic   = w2 - w1
+        delta_log_ev = e2 - e1
+        waic_winner  = 'Model 1' if w1 < w2 else 'Model 2'
+        ev_winner    = 'Model 1' if e1 > e2 else 'Model 2'
+        print('  WAIC favours         : %s  (delta = %+.2f)' % (waic_winner, delta_waic))
+        print('  Log evidence favours : %s  (delta = %+.2f)' % (ev_winner,   delta_log_ev))
+        print()
+        print('  Interpretation of |delta log evidence|:')
+        print('    < 1  : not worth more than a bare mention')
+        print('    1-3  : positive evidence')
+        print('    3-5  : strong evidence')
+        print('    > 5  : very strong evidence')
     print('=' * col)
 
 

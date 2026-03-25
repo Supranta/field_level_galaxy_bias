@@ -118,13 +118,33 @@ def _sample_constant_sigma_params(N_types):
 
 
 def _neyrinck_mean(r, n_bar, beta, delta_g):
-    """Evaluate Neyrinck mean. Returns (N_types, N_pix)."""
-    return neyrinck_model_jax(r[None, :], n_bar[:, None], beta[:, None], delta_g[:, None])
+    """Evaluate Neyrinck mean.
+
+    Parameters
+    ----------
+    r : (1, N_pix) or (N_types, N_pix) float array
+        Effective density ratio, pre-broadcast by the caller.
+
+    Returns
+    -------
+    (N_types, N_pix) float array
+    """
+    return neyrinck_model_jax(r, n_bar[:, None], beta[:, None], delta_g[:, None])
 
 
 def _powerlaw_mean(r, n_bar, beta):
-    """Evaluate power-law mean. Returns (N_types, N_pix)."""
-    return n_bar[:, None] * r[None, :] ** beta[:, None]
+    """Evaluate power-law mean.
+
+    Parameters
+    ----------
+    r : (1, N_pix) or (N_types, N_pix) float array
+        Effective density ratio, pre-broadcast by the caller.
+
+    Returns
+    -------
+    (N_types, N_pix) float array
+    """
+    return n_bar[:, None] * r ** beta[:, None]
 
 
 def _density_sigma(r, S, gamma1, gamma2, A_sigma):
@@ -156,28 +176,41 @@ def _density_model_body(counts, r, mean_type, z_type, sigma_type,
         Base density ratio 1 + delta (tidal correction applied here if needed).
     mean_type, z_type, sigma_type : str
         Same semantics as in build_model.
-    tidal_type : {'none', 's2'}
+    tidal_type : {'none', 's2', 's2_per_type'}
         Whether to apply a tidal bias correction to the effective density.
+        's2_per_type' uses a separate b_s2_t per galaxy type; sigma still
+        uses the unshifted density r.
     s2 : (N_pix,) float array or None
-        Squared tidal field. Required when tidal_type='s2'.
+        Squared tidal field. Required when tidal_type != 'none'.
     """
     N_types, N_pix = counts.shape
 
-    if tidal_type == 's2':
-        assert s2 is not None, "s2 must be provided when tidal_type='s2'"
-        # b_s2 shifts the effective density: r_eff = 1 + delta + b_s2 * s2
-        b_s2 = numpyro.sample("b_s2", dist.Normal(0.0, 2.0))
-        r = r + b_s2 * s2
+    assert tidal_type in ('none', 's2', 's2_per_type')
+    if tidal_type in ('s2', 's2_per_type'):
+        assert s2 is not None, "s2 must be provided when tidal_type != 'none'"
 
-    r = jnp.clip(r, a_min=1e-6)
-    
+    if tidal_type == 's2':
+        # Single shared tidal bias: shifts r uniformly across all types.
+        b_s2   = numpyro.sample("b_s2", dist.Normal(0.0, 2.0))
+        r      = jnp.clip(r + b_s2 * s2, a_min=1e-6)
+        r_mean = r[None, :]                                    # (1, N_pix)
+    elif tidal_type == 's2_per_type':
+        # Per-type tidal bias: each galaxy type has its own b_s2 coefficient.
+        b_s2   = numpyro.sample("b_s2", dist.Normal(0.0, 2.0).expand([N_types]))
+        r      = jnp.clip(r, a_min=1e-6)
+        r_mean = jnp.clip(r[None, :] + b_s2[:, None] * s2[None, :],
+                          a_min=1e-6)                          # (N_types, N_pix)
+    else:
+        r      = jnp.clip(r, a_min=1e-6)
+        r_mean = r[None, :]                                    # (1, N_pix)
+
     # ---- Mean ----
     if mean_type == 'neyrinck':
         n_bar, beta, delta_g = _sample_neyrinck_params(N_types)
-        mu_det = _neyrinck_mean(r, n_bar, beta, delta_g)
+        mu_det = _neyrinck_mean(r_mean, n_bar, beta, delta_g)
     else:  # 'powerlaw'
         n_bar, beta = _sample_powerlaw_params(N_types)
-        mu_det = _powerlaw_mean(r, n_bar, beta)
+        mu_det = _powerlaw_mean(r_mean, n_bar, beta)
 
     # ---- Pure Poisson (no lognormal scatter) ----
     if z_type == 'zero':
@@ -224,17 +257,20 @@ def build_model(mean_type, z_type, sigma_type=None, tidal_type='none'):
         Ignored when z_type='zero'.
         - 'density'  : sigma(r) = S * (r^gamma1 + A_sigma * r^gamma2)
         - 'constant' : sigma is a per-type constant
-    tidal_type : {'none', 's2'}
+    tidal_type : {'none', 's2', 's2_per_type'}
         Whether to include a tidal bias term in the effective density.
-        - 'none' : r_eff = 1 + delta  (no tidal correction)
-        - 's2'   : r_eff = 1 + delta + b_s2 * s2, with b_s2 ~ Normal(0, 2)
+        - 'none'        : r_eff = 1 + delta  (no tidal correction)
+        - 's2'          : r_eff = 1 + delta + b_s2 * s2, scalar b_s2 ~ Normal(0, 2)
+                          shared across all galaxy types
+        - 's2_per_type' : r_eff_t = 1 + delta + b_s2_t * s2, per-type b_s2_t ~ Normal(0, 2)
+                          sigma still uses the shared (unshifted) density
 
     Returns
     -------
     model : callable
         NumPyro model with signature:
         - model(counts, delta)        when tidal_type='none'
-        - model(counts, delta, s2)    when tidal_type='s2'
+        - model(counts, delta, s2)    when tidal_type in ('s2', 's2_per_type')
     """
     if mean_type not in ('neyrinck', 'powerlaw'):
         raise ValueError("mean_type must be 'neyrinck' or 'powerlaw', got '%s'" % mean_type)
@@ -242,13 +278,13 @@ def build_model(mean_type, z_type, sigma_type=None, tidal_type='none'):
         raise ValueError("z_type must be 'shared' or 'zero', got '%s'" % z_type)
     if z_type != 'zero' and sigma_type not in ('density', 'constant'):
         raise ValueError("sigma_type must be 'density' or 'constant', got '%s'" % sigma_type)
-    if tidal_type not in ('none', 's2'):
-        raise ValueError("tidal_type must be 'none' or 's2', got '%s'" % tidal_type)
+    if tidal_type not in ('none', 's2', 's2_per_type'):
+        raise ValueError("tidal_type must be 'none', 's2', or 's2_per_type', got '%s'" % tidal_type)
 
-    if tidal_type == 's2':
+    if tidal_type in ('s2', 's2_per_type'):
         def model(counts, delta, s2):
             _density_model_body(counts, 1.0 + delta, mean_type, z_type, sigma_type,
-                                tidal_type='s2', s2=s2)
+                                tidal_type=tidal_type, s2=s2)
     else:
         def model(counts, delta):
             _density_model_body(counts, 1.0 + delta, mean_type, z_type, sigma_type)

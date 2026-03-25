@@ -43,10 +43,11 @@ Fits a parametric model over all pixels simultaneously, with rate and sigma as e
 - `N_t_i ~ Poisson(rate_t * lambda_i)`
 
 ### build_model() factory (density pipeline)
-Config-driven, three orthogonal choices:
+Config-driven, four orthogonal choices:
 - `mean_type`: `'neyrinck'` (`n_bar * r^beta * exp(-rho_g/r)`) or `'powerlaw'` (`n_bar * r^beta`)
 - `z_type`: `'shared'`, `'independent'`, or `'zero'` (pure Poisson)
 - `sigma_type`: `'density'` (`S * (r^gamma1 + A_sigma * r^gamma2)`) or `'constant'`
+- `tidal_type`: `'none'` (no tidal), `'s2'` (shared `b_s2`, all types), or `'s2_per_type'` (per-type `b_s2_t`)
 
 ## Data Format
 HDF5 file containing:
@@ -67,23 +68,30 @@ num_samples: 500   # optional
 
 **Density pipeline** (`fit_density.py` / `plot_density.py`):
 ```yaml
-n_delta_bins: 10   # used only for plotting
+n_delta_bins: 10         # used only for plotting
 datafile: /path/to/data.h5
 savedir:  /path/to/output
 catalog:  catalog_name
+inference_mode: sample   # 'sample' (NUTS) or 'optimize' (MAP); default: sample
 fit_model:
   mean_type:  neyrinck
   z_type:     shared
   sigma_type: density
   tidal_type: none
-  num_warmup:  500   # optional
-  num_samples: 500   # optional
-nested_model:        # optional; warms up the fit chain from a simpler model
+  # sampling keys (inference_mode: sample)
+  num_warmup:  500
+  num_samples: 500
+  # optimisation keys (inference_mode: optimize)
+  num_steps:    5000
+  learning_rate: 0.01
+nested_model:            # optional; warms up the fit from a simpler model
   mean_type:  neyrinck
   z_type:     shared
   sigma_type: density
   tidal_type: none
-  num_warmup: 100
+  num_warmup: 100        # sampling
+  num_steps:  2000       # optimisation
+  learning_rate: 0.01
 ```
 
 ## Outputs

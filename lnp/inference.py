@@ -1,7 +1,9 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-from numpyro.infer import MCMC, NUTS, log_likelihood, init_to_value
+import optax
+from numpyro.infer import MCMC, NUTS, SVI, Trace_ELBO, log_likelihood, init_to_value
+from numpyro.infer.autoguide import AutoDelta
 
 
 def run_nuts(model, counts, delta=None, s2=None,
@@ -61,6 +63,7 @@ def run_nuts_with_warmstart(
     nested_warmup=100,
     num_warmup=500, num_samples=500,
     seed=42, compute_log_lik=False,
+    n_tidal_params=None,
 ):
     """Run NUTS with warm-start from a simpler nested model.
 
@@ -87,6 +90,11 @@ def run_nuts_with_warmstart(
     num_warmup, num_samples : int
     seed : int
     compute_log_lik : bool
+    n_tidal_params : int or None
+        Number of b_s2 parameters to inject as the warm-start initial value.
+        - None or 1 : scalar b_s2 (tidal_type='s2')
+        - N_types   : per-type b_s2 (tidal_type='s2_per_type')
+        Ignored when s2 is None.
 
     Returns
     -------
@@ -99,8 +107,6 @@ def run_nuts_with_warmstart(
                      'delta': delta_jax}
     fit_kwargs    = {'counts': counts_jax,
                      'delta': delta_jax}
-    if s2 is not None:
-        fit_kwargs['s2'] = jnp.array(s2, dtype=jnp.float32)
 
     # ── 1. Short nested chain ─────────────────────────────────────────────────
     print("Running nested chain (%d warmup, 1 sample)..." % nested_warmup)
@@ -110,6 +116,10 @@ def run_nuts_with_warmstart(
     nested_sample = {k: v[0] for k, v in nested_mcmc.get_samples().items()}
 
     # ── 2. Run fit chain initialised from nested sample ───────────────────────
+    if s2 is not None:
+        fit_kwargs['s2'] = jnp.array(s2, dtype=jnp.float32)
+        n = n_tidal_params if (n_tidal_params is not None and n_tidal_params > 1) else 1
+        nested_sample['b_s2'] = jnp.zeros(n, dtype=jnp.float32)
     print("Running fit chain (%d warmup, %d samples)..." % (num_warmup, num_samples))
     fit_nuts = NUTS(fit_model, init_strategy=init_to_value(values=nested_sample))
     fit_mcmc = MCMC(fit_nuts, num_warmup=num_warmup,
@@ -183,3 +193,160 @@ def compute_summaries(Ng_pp, Ng_data, samples):
         'rate':        np.array(samples['rate']),
         'sigma':       np.array(samples['sigma']),
     }
+
+
+# ---------------------------------------------------------------------------
+# MAP optimisation via SVI + AutoDelta
+# ---------------------------------------------------------------------------
+
+def _make_model_kwargs(counts, delta=None, s2=None):
+    """Build the keyword dict passed to a model callable."""
+    kwargs = {'counts': jnp.array(counts, dtype=jnp.int32)}
+    if delta is not None:
+        kwargs['delta'] = jnp.array(delta, dtype=jnp.float32)
+    if s2 is not None:
+        kwargs['s2'] = jnp.array(s2, dtype=jnp.float32)
+    return kwargs
+
+
+def _svi_map(model, model_kwargs, num_steps, learning_rate, seed,
+             init_loc_fn=None):
+    """Run SVI with AutoDelta to find the MAP estimate.
+
+    Parameters
+    ----------
+    model       : NumPyro model callable
+    model_kwargs: dict of data arrays to pass to model
+    num_steps   : int
+    learning_rate: float
+    seed        : int
+    init_loc_fn : numpyro init strategy or None
+        If given, passed to AutoDelta to warm-start the optimisation.
+
+    Returns
+    -------
+    map_params : dict
+        MAP point estimate for every latent site (no batch dimension).
+    final_loss : float
+        Final SVI loss (negative log joint at MAP).
+    """
+    guide_kwargs = {} if init_loc_fn is None else {'init_loc_fn': init_loc_fn}
+    guide  = AutoDelta(model, **guide_kwargs)
+    svi    = SVI(model, guide, optax.adam(learning_rate), loss=Trace_ELBO())
+    result = svi.run(jax.random.PRNGKey(seed), num_steps, **model_kwargs,
+                     progress_bar=True)
+    map_params  = guide.median(result.params)
+    final_loss  = float(result.losses[-1])
+    return map_params, final_loss
+
+
+def run_map(model, counts, delta=None, s2=None,
+            num_steps=5000, learning_rate=0.01,
+            seed=42, compute_log_lik=False):
+    """Find the MAP estimate of a NumPyro model via SVI with an AutoDelta guide.
+
+    Parameters
+    ----------
+    model        : NumPyro model callable
+    counts       : (N_types, N_pix) int array-like
+    delta        : (N_pix,) float array-like, optional
+    s2           : (N_pix,) float array-like, optional
+        Squared tidal field. Required when tidal_type != 'none'.
+    num_steps    : int
+        Number of SVI optimisation steps.
+    learning_rate: float
+    seed         : int
+    compute_log_lik : bool
+
+    Returns
+    -------
+    samples : dict
+        MAP parameter values, each wrapped in a size-1 leading batch dimension
+        for compatibility with downstream code that expects MCMC-style dicts.
+    log_lik : (1, N_pix) ndarray
+        Only returned when compute_log_lik=True.
+    """
+    model_kwargs        = _make_model_kwargs(counts, delta, s2)
+    map_params, loss    = _svi_map(model, model_kwargs, num_steps,
+                                   learning_rate, seed)
+    print("MAP final loss: %.4f" % loss)
+
+    # Wrap in size-1 batch dim so log_likelihood and downstream scripts work.
+    samples = {k: v[None] for k, v in map_params.items()}
+
+    if not compute_log_lik:
+        return samples
+
+    log_liks = log_likelihood(model, samples, **model_kwargs)
+    log_lik  = np.array(log_liks['obs'])   # (1, N_pix)
+    return samples, log_lik
+
+
+def run_map_with_warmstart(
+    nested_model, fit_model,
+    counts, delta,
+    s2=None,
+    nested_steps=2000, nested_lr=0.01,
+    num_steps=5000, learning_rate=0.01,
+    seed=42, compute_log_lik=False,
+    n_tidal_params=None,
+):
+    """Find the MAP estimate with warm-start from a simpler nested model.
+
+    Optimises the nested model first (without s2), then uses its MAP params
+    to initialise the fit model optimisation.  Parameters absent from the
+    nested model fall back to AutoDelta's default initialisation.
+
+    Parameters
+    ----------
+    nested_model : NumPyro model callable — simpler model, called without s2.
+    fit_model    : NumPyro model callable — full model.
+    counts       : (N_types, N_pix) int array-like
+    delta        : (N_pix,) float array-like
+    s2           : (N_pix,) float array-like, optional
+    nested_steps : int  — SVI steps for the nested model.
+    nested_lr    : float — learning rate for the nested model.
+    num_steps    : int  — SVI steps for the fit model.
+    learning_rate: float — learning rate for the fit model.
+    seed         : int
+    compute_log_lik : bool
+    n_tidal_params : int or None
+        Number of b_s2 parameters to inject into the warm-start values.
+        None or 1 → scalar (tidal_type='s2'); N_types → per-type.
+        Ignored when s2 is None.
+
+    Returns
+    -------
+    samples  : dict  (size-1 batch dimension)
+    log_lik  : (1, N_pix) ndarray — only if compute_log_lik=True.
+    """
+    nested_kwargs = _make_model_kwargs(counts, delta)
+    fit_kwargs    = _make_model_kwargs(counts, delta, s2)
+
+    # ── 1. Optimise nested model ───────────────────────────────────────────────
+    print("Optimising nested model (%d steps)..." % nested_steps)
+    nested_map, nested_loss = _svi_map(nested_model, nested_kwargs,
+                                       nested_steps, nested_lr, seed)
+    print("Nested MAP final loss: %.4f" % nested_loss)
+
+    # Inject zero-initialised b_s2 for the tidal parameters the nested model
+    # does not have.
+    if s2 is not None:
+        n = n_tidal_params if (n_tidal_params is not None and n_tidal_params > 1) else 1
+        nested_map['b_s2'] = jnp.zeros(n, dtype=jnp.float32)
+
+    # ── 2. Optimise fit model, warm-started from nested MAP ───────────────────
+    print("Optimising fit model (%d steps)..." % num_steps)
+    init_loc = init_to_value(values=nested_map)
+    map_params, loss = _svi_map(fit_model, fit_kwargs, num_steps,
+                                learning_rate, seed, init_loc_fn=init_loc)
+    print("MAP final loss: %.4f" % loss)
+
+    samples = {k: v[None] for k, v in map_params.items()}
+
+    if not compute_log_lik:
+        return samples
+
+    log_liks = log_likelihood(fit_model, samples, **fit_kwargs)
+    log_lik  = np.array(log_liks['obs'])   # (1, N_pix)
+    return samples, log_lik

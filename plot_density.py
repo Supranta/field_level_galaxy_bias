@@ -61,8 +61,11 @@ def main(config_path):
         samples = pickle.load(f)
     samples = {k: np.array(v) for k, v in samples.items()}
     n_mcmc  = samples['n_bar'].shape[0]
+    is_map  = n_mcmc == 1
 
     print("Model:   mean=%s  z=%s  sigma=%s" % (mean_type, z_type, sigma_type))
+    if is_map:
+        print("Mode:    MAP (single point estimate — posterior uncertainty unavailable)")
 
     r_flat = 1.0 + delta_flat
     print("N_types: %d,  n_mcmc: %d" % (N_types, n_mcmc))
@@ -151,44 +154,49 @@ def main(config_path):
         }
 
     # ---- Plot 1: GetDist parameter contours ----
-    print("Plotting parameter contours...")
-    names, labels, columns = [], [], []
+    # Skipped for MAP runs: GetDist requires multiple samples to estimate a
+    # posterior distribution; a point estimate carries no uncertainty to plot.
+    if is_map:
+        print("Skipping parameter contours (MAP mode — no posterior distribution).")
+    else:
+        print("Plotting parameter contours...")
+        names, labels, columns = [], [], []
 
-    per_type_params = ['n_bar', 'beta']
-    per_type_latex  = [r'\bar{n}', r'\beta']
-    if mean_type == 'neyrinck':
-        per_type_params += ['delta_g']
-        per_type_latex  += [r'\delta_g']
-    if HAS_Z:
-        if HAS_DENSITY_SIGMA:
-            per_type_params += ['S']
-            per_type_latex  += ['S']
-        else:
-            per_type_params += ['sigma']
-            per_type_latex  += [r'\sigma']
+        per_type_params = ['n_bar', 'beta']
+        per_type_latex  = [r'\bar{n}', r'\beta']
+        if mean_type == 'neyrinck':
+            per_type_params += ['delta_g']
+            per_type_latex  += [r'\delta_g']
+        if HAS_Z:
+            if HAS_DENSITY_SIGMA:
+                per_type_params += ['S']
+                per_type_latex  += ['S']
+            else:
+                per_type_params += ['sigma']
+                per_type_latex  += [r'\sigma']
 
-    for key, latex in zip(per_type_params, per_type_latex):
-        for t in range(N_types):
-            names.append('%s^%d' % (key, t))
-            labels.append('%s^{%d}' % (latex, t))
-            columns.append(samples[key][:, t])
+        for key, latex in zip(per_type_params, per_type_latex):
+            for t in range(N_types):
+                names.append('%s^%d' % (key, t))
+                labels.append('%s^{%d}' % (latex, t))
+                columns.append(samples[key][:, t])
 
-    if mean_type == 'neyrinck_shared':
-        names.append('delta_g')
-        labels.append(r'\delta_g')
-        columns.append(samples['delta_g'])
+        if mean_type == 'neyrinck_shared':
+            names.append('delta_g')
+            labels.append(r'\delta_g')
+            columns.append(samples['delta_g'])
 
-    if HAS_Z and HAS_DENSITY_SIGMA:
-        for key, latex in [('gamma1', r'\gamma_1'), ('gamma2', r'\gamma_2'),
-                           ('A_sigma', 'A_\\sigma')]:
-            names.append(key)
-            labels.append(latex)
-            columns.append(samples[key])
+        if HAS_Z and HAS_DENSITY_SIGMA:
+            for key, latex in [('gamma1', r'\gamma_1'), ('gamma2', r'\gamma_2'),
+                               ('A_sigma', 'A_\\sigma')]:
+                names.append(key)
+                labels.append(latex)
+                columns.append(samples[key])
 
-    data_matrix = np.column_stack(columns)
-    savepath = savedir + '/figs/param_contours.png'
-    plot_getdist_contours(data_matrix, names, labels, savepath)
-    print("Saved:", savepath)
+        data_matrix = np.column_stack(columns)
+        savepath = savedir + '/figs/param_contours.png'
+        plot_getdist_contours(data_matrix, names, labels, savepath)
+        print("Saved:", savepath)
 
     # ---- Per-bin summaries ----
     print("Computing per-bin summaries...")
@@ -252,7 +260,7 @@ def main(config_path):
             mask          = (delta_flat > latent_bins[b]) & (delta_flat <= latent_bins[b + 1])
             z_in_bin      = z_samples[:, mask]        # (n_mcmc, n_pix_bin)
             z_mean_arr[b] = z_in_bin.mean(0).mean()   # pixel-avg then sample-avg
-            z_std_arr[b]  = z_in_bin.std(0).mean()    # pixel-avg posterior std dev
+            z_std_arr[b]  = z_in_bin.std(0).mean() if not is_map else np.nan
             n_pix_arr[b]  = mask.sum()
 
         fig, ax = plt.subplots(1, 2, figsize=(10., 3.5))
