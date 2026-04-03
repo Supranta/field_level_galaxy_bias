@@ -32,13 +32,15 @@ def inference_mode(cfg):
 
 def model_label(cfg):
     """Human-readable label from config keys."""
-    fit  = cfg.get('fit_model', {})
-    mean  = fit.get('mean_type',  '?')
-    z     = fit.get('z_type',     '?')
-    sigma = fit.get('sigma_type', '?')
-    tidal = fit.get('tidal_type', 'none')
-    mode  = inference_mode(cfg)
-    return 'mean=%s  z=%s  sigma=%s  tidal=%s  mode=%s' % (mean, z, sigma, tidal, mode)
+    fit      = cfg.get('fit_model', {})
+    mean     = fit.get('mean_type',     '?')
+    z        = fit.get('z_type',        '?')
+    sigma    = fit.get('sigma_type',    '?')
+    tidal    = fit.get('tidal_type',    'none')
+    smoothed = fit.get('smoothed_type', 'none')
+    mode     = inference_mode(cfg)
+    return 'mean=%s  z=%s  sigma=%s  tidal=%s  smoothed=%s  mode=%s' % (
+        mean, z, sigma, tidal, smoothed, mode)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

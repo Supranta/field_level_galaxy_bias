@@ -6,7 +6,7 @@ from numpyro.infer import MCMC, NUTS, SVI, Trace_ELBO, log_likelihood, init_to_v
 from numpyro.infer.autoguide import AutoDelta
 
 
-def run_nuts(model, counts, delta=None, s2=None,
+def run_nuts(model, counts, delta=None, s2=None, smooth_fields=None,
              num_warmup=500, num_samples=500,
              seed=42, compute_log_lik=False):
     """Run NUTS on a NumPyro model.
@@ -21,6 +21,8 @@ def run_nuts(model, counts, delta=None, s2=None,
         Matter overdensity field. Required for the density model.
     s2 : (N_pix,) array-like of float, optional
         Squared tidal field. Required when tidal_type='s2'.
+    smooth_fields : (n_scales, N_pix) array-like of float, optional
+        Band-pass filtered fields. Required when smoothed_type != 'none'.
     num_warmup : int
     num_samples : int
     seed : int
@@ -35,12 +37,7 @@ def run_nuts(model, counts, delta=None, s2=None,
     log_lik : (n_samples,) ndarray
         Only returned when compute_log_lik=True.
     """
-    counts_jax   = jnp.array(counts, dtype=jnp.int32)
-    model_kwargs = {'counts': counts_jax}
-    if delta is not None:
-        model_kwargs['delta'] = jnp.array(delta, dtype=jnp.float32)
-    if s2 is not None:
-        model_kwargs['s2'] = jnp.array(s2, dtype=jnp.float32)
+    model_kwargs = _make_model_kwargs(counts, delta, s2, smooth_fields)
 
     mcmc = MCMC(NUTS(model), num_warmup=num_warmup,
                 num_samples=num_samples, progress_bar=True)
@@ -60,10 +57,11 @@ def run_nuts_with_warmstart(
     nested_model, fit_model,
     counts, delta,
     s2=None,
+    smooth_fields=None,
     nested_warmup=100,
     num_warmup=500, num_samples=500,
     seed=42, compute_log_lik=False,
-    n_tidal_params=None,
+    b_smooth_init_shape=None,
 ):
     """Run NUTS with warm-start from a simpler nested model.
 
@@ -90,23 +88,14 @@ def run_nuts_with_warmstart(
     num_warmup, num_samples : int
     seed : int
     compute_log_lik : bool
-    n_tidal_params : int or None
-        Number of b_s2 parameters to inject as the warm-start initial value.
-        - None or 1 : scalar b_s2 (tidal_type='s2')
-        - N_types   : per-type b_s2 (tidal_type='s2_per_type')
-        Ignored when s2 is None.
 
     Returns
     -------
     samples : dict
     log_lik : (n_samples,) ndarray — only if compute_log_lik=True.
     """    
-    counts_jax  = jnp.array(counts, dtype=jnp.int32)
-    delta_jax   = jnp.array(delta, dtype=jnp.float32)
-    nested_kwargs = {'counts': counts_jax,
-                     'delta': delta_jax}
-    fit_kwargs    = {'counts': counts_jax,
-                     'delta': delta_jax}
+    nested_kwargs = _make_model_kwargs(counts, delta)
+    fit_kwargs    = _make_model_kwargs(counts, delta, s2, smooth_fields)
 
     # ── 1. Short nested chain ─────────────────────────────────────────────────
     print("Running nested chain (%d warmup, 1 sample)..." % nested_warmup)
@@ -117,9 +106,9 @@ def run_nuts_with_warmstart(
 
     # ── 2. Run fit chain initialised from nested sample ───────────────────────
     if s2 is not None:
-        fit_kwargs['s2'] = jnp.array(s2, dtype=jnp.float32)
-        n = n_tidal_params if (n_tidal_params is not None and n_tidal_params > 1) else 1
-        nested_sample['b_s2'] = jnp.zeros(n, dtype=jnp.float32)
+        nested_sample['b_s2'] = jnp.float32(0.0)
+    if smooth_fields is not None and b_smooth_init_shape is not None:
+        nested_sample['b_smooth'] = jnp.zeros(b_smooth_init_shape, dtype=jnp.float32)
     print("Running fit chain (%d warmup, %d samples)..." % (num_warmup, num_samples))
     fit_nuts = NUTS(fit_model, init_strategy=init_to_value(values=nested_sample))
     fit_mcmc = MCMC(fit_nuts, num_warmup=num_warmup,
@@ -199,13 +188,15 @@ def compute_summaries(Ng_pp, Ng_data, samples):
 # MAP optimisation via SVI + AutoDelta
 # ---------------------------------------------------------------------------
 
-def _make_model_kwargs(counts, delta=None, s2=None):
+def _make_model_kwargs(counts, delta=None, s2=None, smooth_fields=None):
     """Build the keyword dict passed to a model callable."""
     kwargs = {'counts': jnp.array(counts, dtype=jnp.int32)}
     if delta is not None:
         kwargs['delta'] = jnp.array(delta, dtype=jnp.float32)
     if s2 is not None:
         kwargs['s2'] = jnp.array(s2, dtype=jnp.float32)
+    if smooth_fields is not None:
+        kwargs['smooth_fields'] = jnp.array(smooth_fields, dtype=jnp.float32)
     return kwargs
 
 
@@ -240,7 +231,7 @@ def _svi_map(model, model_kwargs, num_steps, learning_rate, seed,
     return map_params, final_loss
 
 
-def run_map(model, counts, delta=None, s2=None,
+def run_map(model, counts, delta=None, s2=None, smooth_fields=None,
             num_steps=5000, learning_rate=0.01,
             seed=42, compute_log_lik=False):
     """Find the MAP estimate of a NumPyro model via SVI with an AutoDelta guide.
@@ -266,7 +257,7 @@ def run_map(model, counts, delta=None, s2=None,
     log_lik : (1, N_pix) ndarray
         Only returned when compute_log_lik=True.
     """
-    model_kwargs        = _make_model_kwargs(counts, delta, s2)
+    model_kwargs        = _make_model_kwargs(counts, delta, s2, smooth_fields)
     map_params, loss    = _svi_map(model, model_kwargs, num_steps,
                                    learning_rate, seed)
     print("MAP final loss: %.4f" % loss)
@@ -286,10 +277,11 @@ def run_map_with_warmstart(
     nested_model, fit_model,
     counts, delta,
     s2=None,
+    smooth_fields=None,
     nested_steps=2000, nested_lr=0.01,
     num_steps=5000, learning_rate=0.01,
     seed=42, compute_log_lik=False,
-    n_tidal_params=None,
+    b_smooth_init_shape=None,
 ):
     """Find the MAP estimate with warm-start from a simpler nested model.
 
@@ -310,10 +302,6 @@ def run_map_with_warmstart(
     learning_rate: float — learning rate for the fit model.
     seed         : int
     compute_log_lik : bool
-    n_tidal_params : int or None
-        Number of b_s2 parameters to inject into the warm-start values.
-        None or 1 → scalar (tidal_type='s2'); N_types → per-type.
-        Ignored when s2 is None.
 
     Returns
     -------
@@ -321,7 +309,7 @@ def run_map_with_warmstart(
     log_lik  : (1, N_pix) ndarray — only if compute_log_lik=True.
     """
     nested_kwargs = _make_model_kwargs(counts, delta)
-    fit_kwargs    = _make_model_kwargs(counts, delta, s2)
+    fit_kwargs    = _make_model_kwargs(counts, delta, s2, smooth_fields)
 
     # ── 1. Optimise nested model ───────────────────────────────────────────────
     print("Optimising nested model (%d steps)..." % nested_steps)
@@ -332,8 +320,9 @@ def run_map_with_warmstart(
     # Inject zero-initialised b_s2 for the tidal parameters the nested model
     # does not have.
     if s2 is not None:
-        n = n_tidal_params if (n_tidal_params is not None and n_tidal_params > 1) else 1
-        nested_map['b_s2'] = jnp.zeros(n, dtype=jnp.float32)
+        nested_map['b_s2'] = jnp.float32(0.0)
+    if smooth_fields is not None and b_smooth_init_shape is not None:
+        nested_map['b_smooth'] = jnp.zeros(b_smooth_init_shape, dtype=jnp.float32)
 
     # ── 2. Optimise fit model, warm-started from nested MAP ───────────────────
     print("Optimising fit model (%d steps)..." % num_steps)

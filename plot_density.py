@@ -24,9 +24,43 @@ from lnp.density_functions import neyrinck_model_jax, sigma_model_jax
 from lnp.plotting import (plot_mean_variance_sigma, plot_crosscorr_vs_density,
                           plot_getdist_contours, plot_latent_vs_density,
                           plot_latent_power_spectra, plot_combined_crosscorr_spectra,
-                          plot_latent_maps)
+                          plot_latent_maps, plot_smoothing_filter)
 from lnp.power_spectrum import (make_k_bins, compute_latent_power_spectra,
-                                 compute_residual_crosscorr_spectra)
+                                 compute_residual_crosscorr_spectra,
+                                 compute_s2_flat, compute_band_pass_fields)
+
+
+def _compute_effective_filter(k_arr, b_smooth_samples, smoothing_scales):
+    """Compute the posterior mean and std of the effective density filter W_eff(k).
+
+    W_eff(k) = 1 + sum_r b_r * [W(k, R_{r+1}) - W(k, R_r)]
+    where W(k, R) = exp(-k^2 R^2 / 2) and R_0 = 0 (unsmoothed).
+
+    Parameters
+    ----------
+    k_arr            : (n_k,) ndarray
+    b_smooth_samples : (n_mcmc, n_scales) or (n_mcmc, N_types, n_scales) ndarray
+    smoothing_scales : sequence of float
+
+    Returns
+    -------
+    W_eff_mean : (n_k,) or (N_types, n_k) ndarray
+    W_eff_std  : same shape, or None when n_mcmc == 1 (MAP)
+    """
+    scales = [0.] + list(smoothing_scales)
+    # Band-pass kernels: F[r, k] = W(k, R_{r+1}) - W(k, R_r)
+    F = np.array([
+        np.exp(-0.5 * k_arr**2 * scales[r + 1]**2)
+        - np.exp(-0.5 * k_arr**2 * scales[r]**2)
+        for r in range(len(smoothing_scales))
+    ])  # (n_scales, n_k)
+
+    # W_eff per sample: 1 + b @ F  — works for both (n_mcmc, n_scales) and (n_mcmc, N_types, n_scales)
+    W_eff_samples = 1.0 + np.einsum('...r,rk->...k', b_smooth_samples, F)
+
+    W_eff_mean = W_eff_samples.mean(0)
+    W_eff_std  = W_eff_samples.std(0) if W_eff_samples.shape[0] > 1 else None
+    return W_eff_mean, W_eff_std
 
 
 def main(config_path):
@@ -45,9 +79,15 @@ def main(config_path):
     n_latent_bins = cfg.get('n_latent_bins', n_delta_bins)
     n_k_bins      = cfg.get('n_k_bins', 20)
 
+    smoothed_type    = fit_cfg.get('smoothed_type', 'none')
+    smoothing_scales = fit_cfg.get('smoothing_scales', [])
+
     HAS_Z             = z_type != 'zero'
     HAS_DENSITY_SIGMA = HAS_Z and sigma_type == 'density'
     HAS_NEYRINCK_MEAN = mean_type == 'neyrinck'
+    HAS_SMOOTH        = smoothed_type != 'none'
+    tidal_type        = fit_cfg.get('tidal_type', 'none')
+    HAS_TIDAL         = tidal_type == 's2'
 
     delta_slab, Ng = load_data(datafile, catalog)
     N_slabs, H, W  = delta_slab.shape
@@ -70,8 +110,28 @@ def main(config_path):
     r_flat = 1.0 + delta_flat
     print("N_types: %d,  n_mcmc: %d" % (N_types, n_mcmc))
 
-    delta_bins = compute_delta_bins(delta_flat, n_delta_bins)
-    delta_mean = compute_delta_mean(delta_flat, delta_bins)
+    s2_flat       = None
+    smooth_fields = None
+    if HAS_TIDAL:
+        print("Computing tidal field s2 (box_size=%.1f)..." % box_size)
+        s2_flat = compute_s2_flat(delta_slab, box_size)
+    if HAS_SMOOTH:
+        print("Computing band-pass fields (scales=%s, box_size=%.1f)..." % (smoothing_scales, box_size))
+        smooth_fields = compute_band_pass_fields(delta_slab, smoothing_scales, box_size)
+
+    r_eff_flat = r_flat.copy()
+    if HAS_TIDAL:
+        b_s2_med   = float(np.median(samples['b_s2']))
+        r_eff_flat = r_eff_flat + b_s2_med * s2_flat
+    if HAS_SMOOTH:
+        b_smooth_med = np.median(samples['b_smooth'], axis=0)   # (n_scales,)
+        r_eff_flat   = r_eff_flat + b_smooth_med @ smooth_fields
+    r_eff_flat = np.clip(r_eff_flat, 1e-6, None)
+
+    delta_eff_flat = r_eff_flat - 1.0
+
+    delta_bins = compute_delta_bins(delta_eff_flat, n_delta_bins)
+    delta_mean = compute_delta_mean(delta_eff_flat, delta_bins)
     r_axis     = np.log(1.0 + delta_mean)
 
     # ---- Model-aware posterior predictive helpers ----
@@ -127,8 +187,8 @@ def main(config_path):
 
     def get_bin_summaries(select_mask):
         Ng_bin = Ng_flat[:, select_mask]
-        r_bin  = r_flat[select_mask].astype(np.float32)
-        r_mean = float(r_flat[select_mask].mean())
+        r_bin  = r_eff_flat[select_mask].astype(np.float32)
+        r_mean = float(r_eff_flat[select_mask].mean())
         r_3d   = r_bin[None, None, :]                  # (1, 1, N_pix_bin)
 
         mu = _mu_det(r_3d)                             # (n_mcmc, N_types, N_pix_bin)
@@ -202,7 +262,7 @@ def main(config_path):
     print("Computing per-bin summaries...")
     bin_summaries = []
     for n in trange(n_delta_bins):
-        select = (delta_flat > delta_bins[n]) & (delta_flat <= delta_bins[n + 1])
+        select = (delta_eff_flat > delta_bins[n]) & (delta_eff_flat <= delta_bins[n + 1])
         bin_summaries.append(get_bin_summaries(select))
 
     def stack(key):
@@ -223,7 +283,7 @@ def main(config_path):
 
     # ---- Plot 2: mean / variance / sigma ----
     print("Plotting mean / variance / sigma vs density...")
-    fig, ax = plt.subplots(N_types, 3, figsize=(13., 3 * N_types))
+    fig, ax = plt.subplots(N_types, 3, figsize=(13., 3 * N_types), squeeze=False)
     plot_mean_variance_sigma(ax, r_axis, data_mean, data_vom,
                              model_mean, model_vom, sigma_mean)
     plt.tight_layout()
@@ -233,15 +293,16 @@ def main(config_path):
     print("Saved:", savepath)
 
     # ---- Plot 3: pairwise cross-correlations ----
-    print("Plotting cross-correlations vs density...")
-    fig, ax = plt.subplots(N_types - 1, N_types - 1,
-                           figsize=((N_types - 1) * 4., (N_types - 1) * 3.))
-    plot_crosscorr_vs_density(ax, r_axis, data_rho_c, model_rho_c)
-    plt.tight_layout()
-    savepath = savedir + '/figs/rho_c_delta.png'
-    plt.savefig(savepath, dpi=150.)
-    plt.close()
-    print("Saved:", savepath)
+    if N_types > 1:
+        print("Plotting cross-correlations vs density...")
+        fig, ax = plt.subplots(N_types - 1, N_types - 1,
+                               figsize=((N_types - 1) * 4., (N_types - 1) * 3.))
+        plot_crosscorr_vs_density(ax, r_axis, data_rho_c, model_rho_c)
+        plt.tight_layout()
+        savepath = savedir + '/figs/rho_c_delta.png'
+        plt.savefig(savepath, dpi=150.)
+        plt.close()
+        print("Saved:", savepath)
 
     # ---- Plots 4–7: latent field diagnostics (only when latent z exists) ----
     def _plot_latent_diagnostics():
@@ -282,13 +343,25 @@ def main(config_path):
             box_size=box_size, n_k_bins=n_k_bins,
         )
 
+        np.savez(
+            savedir + '/latent_power_spectra.npz',
+            k_centres=k_centres,
+            log_pk_mean=log_pk_mean,
+            log_pk_std=log_pk_std,
+            log_pk_prior_mean=log_pk_prior_mean,
+            log_pk_prior_std=log_pk_prior_std,
+            rho_c_mean=rho_c_mean,
+            rho_c_std=rho_c_std,
+        )
+        print("Saved:", savedir + '/latent_power_spectra.npz')
+
         # -- Residual cross-correlation with delta --
         # For each MCMC sample: compute rate_i, form residual_i = rate_i - Ng,
         # compute rho_c(k) for that sample, accumulate. This mirrors how the
         # latent spectra are computed and yields mean + uncertainty.
         print("Computing per-sample residual cross-correlation spectra...")
         N_pix              = delta_flat.shape[0]
-        r_3d               = r_flat[None, None, :]   # (1, 1, N_pix)
+        r_3d               = r_eff_flat[None, None, :]   # (1, 1, N_pix)
         field, k_bins      = make_k_bins(N_grid, box_size, n_k_bins)
         rho_c_resid_samples = np.empty((n_mcmc, N_types, N_slabs, n_k_bins))
 
@@ -329,6 +402,14 @@ def main(config_path):
         rho_c_resid_mean = rho_c_resid_samples.mean(0)   # (N_types, N_slabs, n_k_bins)
         rho_c_resid_std  = rho_c_resid_samples.std(0)
 
+        np.savez(
+            savedir + '/residual_crosscorr_spectra.npz',
+            k_centres=k_centres,
+            rho_c_resid_mean=rho_c_resid_mean,
+            rho_c_resid_std=rho_c_resid_std,
+        )
+        print("Saved:", savedir + '/residual_crosscorr_spectra.npz')
+
         n_show = min(8, N_slabs)
         n_rows = (n_show + 3) // 4   # 1 or 2 rows of 4 panels
 
@@ -365,6 +446,30 @@ def main(config_path):
         plot_latent_maps(ax, delta_slab, z_mean_map, z_std_map, n_show=n_show_maps)
         plt.tight_layout()
         savepath = savedir + '/figs/latent_maps.png'
+        plt.savefig(savepath, dpi=150.)
+        plt.close()
+        print("Saved:", savepath)
+
+    # ---- Plot: effective smoothing filter ----
+    if HAS_SMOOTH:
+        print("Plotting effective smoothing filter...")
+        k_min = 2.0 * np.pi / box_size
+        k_max = 2.0 * np.pi / (min(smoothing_scales) / 4.0)
+        k_arr = np.logspace(np.log10(k_min), np.log10(k_max), 200)
+
+        b_smooth_samples = samples['b_smooth']  # (n_mcmc, n_scales) or (n_mcmc, N_types, n_scales)
+        W_eff_mean, W_eff_std = _compute_effective_filter(k_arr, b_smooth_samples, smoothing_scales)
+
+        filter_save = dict(k_arr=k_arr, W_eff_mean=W_eff_mean)
+        if W_eff_std is not None:
+            filter_save['W_eff_std'] = W_eff_std
+        np.savez(savedir + '/smoothing_filter.npz', **filter_save)
+        print("Saved:", savedir + '/smoothing_filter.npz')
+
+        fig, ax = plt.subplots(figsize=(7., 4.))
+        plot_smoothing_filter(ax, k_arr, W_eff_mean, W_eff_std, smoothing_scales)
+        plt.tight_layout()
+        savepath = savedir + '/figs/smoothing_filter.png'
         plt.savefig(savepath, dpi=150.)
         plt.close()
         print("Saved:", savepath)

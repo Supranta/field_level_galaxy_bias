@@ -74,6 +74,8 @@ def plot_crosscorr_vs_density(ax, r_axis, data_rho_c, model_rho_c):
     data_rho_c, model_rho_c : (n_bins, N_types, N_types) ndarray
     """
     N_types = data_rho_c.shape[1]
+    if N_types < 2:
+        return
     for i in range(N_types - 1):
         for j in range(N_types - 1):
             ax_ij = ax[i, j] if N_types > 2 else ax
@@ -104,7 +106,7 @@ def plot_count_pdfs(Ng_data, Ng_model, N_types, savepath):
     N_types  : int
     savepath : str
     """
-    fig, ax = plt.subplots(N_types, 2, figsize=(8., 2.5 * N_types))
+    fig, ax = plt.subplots(N_types, 2, figsize=(8., 2.5 * N_types), squeeze=False)
     for j in range(N_types):
         for i in range(2):
             ax[j, i].set_title('Type %d' % (j + 1))
@@ -302,6 +304,50 @@ def plot_latent_maps(ax, delta_slab, z_mean_map, z_std_map, n_show=4):
         ax[0, i].imshow(_normalize(delta_slab[i]),  vmin=-1.5, vmax=2.5)
         ax[1, i].imshow(_normalize(z_mean_map[i]),  vmin=-1.5, vmax=1.5)
         ax[2, i].imshow(z_std_map[i], vmin=0.1, vmax=0.5)
+
+
+def plot_smoothing_filter(ax, k_arr, W_eff_mean, W_eff_std, smoothing_scales):
+    """Plot the effective density filter W_eff(k) implied by the smoothed-bias parameters.
+
+    The effective filter combines the unsmoothed field with band-pass filtered
+    contributions: W_eff(k) = 1 + sum_r b_r * [W(k,R_{r+1}) - W(k,R_r)], where
+    W(k,R) = exp(-k^2 R^2 / 2) and R_0 = 0.
+
+    Parameters
+    ----------
+    ax              : matplotlib.axes.Axes
+    k_arr           : (n_k,) ndarray — wavenumber array
+    W_eff_mean      : (n_k,) or (N_types, n_k) ndarray
+        Posterior mean of W_eff. Shape: (n_k,) for smoothed_type='shared'.
+    W_eff_std       : same shape as W_eff_mean, or None
+        Posterior std dev. None for MAP (single point estimate).
+    smoothing_scales : sequence of float
+        Gaussian smoothing lengths (same units as 1/k). Vertical lines are drawn
+        at k = 1/R to mark the scale boundaries.
+    """
+    cmap   = mcm.get_cmap('cividis')
+    W_mean = np.atleast_2d(W_eff_mean)   # (N_lines, n_k); works for both 1-D and 2-D input
+    W_std  = np.atleast_2d(W_eff_std) if W_eff_std is not None else None
+    N_lines = W_mean.shape[0]
+    colors  = [cmap(t / max(N_lines, 1)) for t in range(N_lines)]
+    labels  = ['Type %d' % (t + 1) for t in range(N_lines)] if N_lines > 1 else ['W_eff(k)']
+
+    for t in range(N_lines):
+        ax.semilogx(k_arr, W_mean[t], color=colors[t], label=labels[t])
+        if W_std is not None:
+            ax.fill_between(k_arr,
+                            W_mean[t] - W_std[t],
+                            W_mean[t] + W_std[t],
+                            color=colors[t], alpha=0.25)
+
+    ax.axhline(1., color='k', ls='--', lw=0.8, label='No bias')
+    for R in smoothing_scales:
+        ax.axvline(1. / R, color='gray', ls=':', lw=0.8)
+
+    ax.set_xlabel(r'$k$')
+    ax.set_ylabel(r'$W_\mathrm{eff}(k)$')
+    ax.set_title('Effective density filter')
+    ax.legend()
 
 
 def plot_corrcoef_matrix(rho_c_data, rho_c_model, N_types, savepath):

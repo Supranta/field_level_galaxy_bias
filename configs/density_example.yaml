@@ -13,7 +13,7 @@ fit_model:
   mean_type:  neyrinck      # 'neyrinck' | 'powerlaw'
   z_type:     shared        # 'shared' | 'zero'
   sigma_type: density       # 'density' | 'constant'  (ignored if z_type: zero)
-  tidal_type: none          # 'none' | 's2' | 's2_per_type'
+  tidal_type: none          # 'none' | 's2'
   num_warmup:  500
   num_samples: 500
 

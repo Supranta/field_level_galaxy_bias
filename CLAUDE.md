@@ -43,11 +43,13 @@ Fits a parametric model over all pixels simultaneously, with rate and sigma as e
 - `N_t_i ~ Poisson(rate_t * lambda_i)`
 
 ### build_model() factory (density pipeline)
-Config-driven, four orthogonal choices:
+Config-driven, six orthogonal choices:
 - `mean_type`: `'neyrinck'` (`n_bar * r^beta * exp(-rho_g/r)`) or `'powerlaw'` (`n_bar * r^beta`)
-- `z_type`: `'shared'`, `'independent'`, or `'zero'` (pure Poisson)
+- `z_type`: `'shared'` or `'zero'` (pure Poisson); z is always `Normal(0,1)` per pixel
 - `sigma_type`: `'density'` (`S * (r^gamma1 + A_sigma * r^gamma2)`) or `'constant'`
-- `tidal_type`: `'none'` (no tidal), `'s2'` (shared `b_s2`, all types), or `'s2_per_type'` (per-type `b_s2_t`)
+- `tidal_type`: `'none'` (no tidal) or `'s2'` (shared `b_s2`, all types)
+- `smoothed_type`: `'none'` or `'shared'` — band-pass smoothed-field bias in `r_mean`
+- `sigma_delta_type`: `'plain'` (sigma uses `clip(1+delta, 1e-6)`) or `'effective'` (sigma uses `r_mean` after tidal + smoothed corrections)
 
 ## Data Format
 HDF5 file containing:
@@ -74,10 +76,13 @@ savedir:  /path/to/output
 catalog:  catalog_name
 inference_mode: sample   # 'sample' (NUTS) or 'optimize' (MAP); default: sample
 fit_model:
-  mean_type:  neyrinck
-  z_type:     shared
-  sigma_type: density
-  tidal_type: none
+  mean_type:        neyrinck
+  z_type:           shared
+  sigma_type:       density
+  tidal_type:       none
+  smoothed_type:    none          # 'none' | 'shared'
+  sigma_delta_type: plain         # 'plain' | 'effective'
+  smoothing_scales: [2., 4., 8.]  # Gaussian smoothing lengths in Mpc/h; required when smoothed_type != 'none'
   # sampling keys (inference_mode: sample)
   num_warmup:  500
   num_samples: 500

@@ -148,8 +148,15 @@ def _powerlaw_mean(r, n_bar, beta):
 
 
 def _density_sigma(r, S, gamma1, gamma2, A_sigma):
-    """Evaluate density-dependent sigma, clipped to (1e-6, 4). Returns (N_types, N_pix)."""
-    raw = sigma_model_jax(r[None, :], S[:, None], gamma1, gamma2, A_sigma)
+    """Evaluate density-dependent sigma, clipped to (1e-6, 4). Returns (N_types, N_pix).
+
+    Parameters
+    ----------
+    r : (N_pix,) or (1, N_pix) or (N_types, N_pix) float array
+        Density field. 1D input is expanded to (1, N_pix) for broadcasting.
+    """
+    r_2d = r[None, :] if r.ndim == 1 else r
+    raw = sigma_model_jax(r_2d, S[:, None], gamma1, gamma2, A_sigma)
     return jnp.clip(raw, 1e-6, 4.0)
 
 
@@ -166,7 +173,9 @@ def _observe(rate, counts):
 # ---------------------------------------------------------------------------
 
 def _density_model_body(counts, r, mean_type, z_type, sigma_type,
-                        tidal_type='none', s2=None):
+                        tidal_type='none', s2=None,
+                        smoothed_type='none', smooth_fields=None,
+                        sigma_delta_type='plain'):
     """Shared model body for all density model variants.
 
     Parameters
@@ -176,33 +185,47 @@ def _density_model_body(counts, r, mean_type, z_type, sigma_type,
         Base density ratio 1 + delta (tidal correction applied here if needed).
     mean_type, z_type, sigma_type : str
         Same semantics as in build_model.
-    tidal_type : {'none', 's2', 's2_per_type'}
+    tidal_type : {'none', 's2'}
         Whether to apply a tidal bias correction to the effective density.
-        's2_per_type' uses a separate b_s2_t per galaxy type; sigma still
-        uses the unshifted density r.
     s2 : (N_pix,) float array or None
-        Squared tidal field. Required when tidal_type != 'none'.
+        Squared tidal field. Required when tidal_type == 's2'.
+    smoothed_type : {'none', 'shared'}
+        Whether to include smoothed-field bias terms in the effective density.
+    smooth_fields : (n_scales, N_pix) float array or None
+        Band-pass filtered fields. Required when smoothed_type != 'none'.
+    sigma_delta_type : {'plain', 'effective'}
+        Which density field sigma uses when sigma_type='density'.
+        - 'plain'     : sigma uses clip(1 + delta, 1e-6)
+        - 'effective' : sigma uses r_mean (after tidal + smoothed corrections)
+        Ignored when sigma_type='constant'.
     """
     N_types, N_pix = counts.shape
 
-    assert tidal_type in ('none', 's2', 's2_per_type')
-    if tidal_type in ('s2', 's2_per_type'):
+    assert tidal_type in ('none', 's2')
+    if tidal_type == 's2':
         assert s2 is not None, "s2 must be provided when tidal_type != 'none'"
+    assert smoothed_type in ('none', 'shared')
+    if smoothed_type != 'none':
+        assert smooth_fields is not None, "smooth_fields required when smoothed_type != 'none'"
+    assert sigma_delta_type in ('plain', 'effective')
+
+    # r_sigma: plain density used by sigma (never shifted by bias terms)
+    r_sigma = jnp.clip(r, a_min=1e-6)
+
+    # r_mean: effective density for the mean, accumulates bias corrections
+    r_mean = r[None, :]  # (1, N_pix)
 
     if tidal_type == 's2':
-        # Single shared tidal bias: shifts r uniformly across all types.
         b_s2   = numpyro.sample("b_s2", dist.Normal(0.0, 2.0))
-        r      = jnp.clip(r + b_s2 * s2, a_min=1e-6)
-        r_mean = r[None, :]                                    # (1, N_pix)
-    elif tidal_type == 's2_per_type':
-        # Per-type tidal bias: each galaxy type has its own b_s2 coefficient.
-        b_s2   = numpyro.sample("b_s2", dist.Normal(0.0, 2.0).expand([N_types]))
-        r      = jnp.clip(r, a_min=1e-6)
-        r_mean = jnp.clip(r[None, :] + b_s2[:, None] * s2[None, :],
-                          a_min=1e-6)                          # (N_types, N_pix)
-    else:
-        r      = jnp.clip(r, a_min=1e-6)
-        r_mean = r[None, :]                                    # (1, N_pix)
+        r_mean = r_mean + b_s2 * s2[None, :]
+
+    if smoothed_type == 'shared':
+        n_scales = smooth_fields.shape[0]
+        b_smooth = numpyro.sample("b_smooth", dist.Normal(0.0, 2.0).expand([n_scales]))
+        # dot over scales: b_smooth (n_scales,) @ smooth_fields (n_scales, N_pix) -> (N_pix,)
+        r_mean = r_mean + jnp.dot(b_smooth, smooth_fields)[None, :]
+
+    r_mean = jnp.clip(r_mean, a_min=1e-6)
 
     # ---- Mean ----
     if mean_type == 'neyrinck':
@@ -221,13 +244,14 @@ def _density_model_body(counts, r, mean_type, z_type, sigma_type,
     # ---- Sigma ----
     if sigma_type == 'density':
         S, gamma1, gamma2, A_sigma = _sample_density_sigma_params(N_types)
+        r_for_sigma = r_mean if sigma_delta_type == 'effective' else r_sigma
     else:
         sigma_t = _sample_constant_sigma_params(N_types)
 
     # ---- Shared z: one draw per pixel, shared across all types ----
     with numpyro.plate("pix", N_pix):
         z     = numpyro.sample("z", dist.Normal(0.0, 1.0))
-        sigma = (_density_sigma(r, S, gamma1, gamma2, A_sigma)
+        sigma = (_density_sigma(r_for_sigma, S, gamma1, gamma2, A_sigma)
                  if sigma_type == 'density'
                  else jnp.clip(sigma_t[:, None] * jnp.ones((1, N_pix)), 1e-6, 4.0))
         lam   = jnp.exp(sigma * z[None, :] - 0.5 * sigma ** 2)
@@ -238,8 +262,9 @@ def _density_model_body(counts, r, mean_type, z_type, sigma_type,
 # Density model (parametric) — factory
 # ---------------------------------------------------------------------------
 
-def build_model(mean_type, z_type, sigma_type=None, tidal_type='none'):
-    """Build a NumPyro model from four orthogonal design choices.
+def build_model(mean_type, z_type, sigma_type=None, tidal_type='none', smoothed_type='none',
+                sigma_delta_type='plain'):
+    """Build a NumPyro model from six orthogonal design choices.
 
     Parameters
     ----------
@@ -257,20 +282,27 @@ def build_model(mean_type, z_type, sigma_type=None, tidal_type='none'):
         Ignored when z_type='zero'.
         - 'density'  : sigma(r) = S * (r^gamma1 + A_sigma * r^gamma2)
         - 'constant' : sigma is a per-type constant
-    tidal_type : {'none', 's2', 's2_per_type'}
-        Whether to include a tidal bias term in the effective density.
-        - 'none'        : r_eff = 1 + delta  (no tidal correction)
-        - 's2'          : r_eff = 1 + delta + b_s2 * s2, scalar b_s2 ~ Normal(0, 2)
-                          shared across all galaxy types
-        - 's2_per_type' : r_eff_t = 1 + delta + b_s2_t * s2, per-type b_s2_t ~ Normal(0, 2)
-                          sigma still uses the shared (unshifted) density
+    tidal_type : {'none', 's2'}
+        Whether to include a tidal bias term in the effective density r_mean.
+        - 'none' : r_mean = 1 + delta
+        - 's2'   : r_mean = 1 + delta + b_s2 * s2, scalar b_s2 ~ Normal(0, 2)
+    smoothed_type : {'none', 'shared'}
+        Whether to include smoothed-field bias terms in the effective density r_mean.
+        Band-pass fields band_R = delta_smooth(R_{i+1}) - delta_smooth(R_i) are
+        provided as smooth_fields at call time.
+        - 'none'   : no smoothed bias
+        - 'shared' : r_mean += sum_R b_smooth[R] * band_R, scalar b_smooth per scale
+    sigma_delta_type : {'plain', 'effective'}
+        Which density field sigma uses when sigma_type='density'.
+        - 'plain'     : sigma uses clip(1 + delta, 1e-6)  (default)
+        - 'effective' : sigma uses r_mean (after tidal + smoothed corrections);
+                        when r_mean is (N_types, N_pix) each type gets its own sigma density
+        Ignored when sigma_type='constant'.
 
     Returns
     -------
     model : callable
-        NumPyro model with signature:
-        - model(counts, delta)        when tidal_type='none'
-        - model(counts, delta, s2)    when tidal_type in ('s2', 's2_per_type')
+        NumPyro model with signature model(counts, delta, s2=None, smooth_fields=None).
     """
     if mean_type not in ('neyrinck', 'powerlaw'):
         raise ValueError("mean_type must be 'neyrinck' or 'powerlaw', got '%s'" % mean_type)
@@ -278,15 +310,17 @@ def build_model(mean_type, z_type, sigma_type=None, tidal_type='none'):
         raise ValueError("z_type must be 'shared' or 'zero', got '%s'" % z_type)
     if z_type != 'zero' and sigma_type not in ('density', 'constant'):
         raise ValueError("sigma_type must be 'density' or 'constant', got '%s'" % sigma_type)
-    if tidal_type not in ('none', 's2', 's2_per_type'):
-        raise ValueError("tidal_type must be 'none', 's2', or 's2_per_type', got '%s'" % tidal_type)
+    if tidal_type not in ('none', 's2'):
+        raise ValueError("tidal_type must be 'none' or 's2', got '%s'" % tidal_type)
+    if smoothed_type not in ('none', 'shared'):
+        raise ValueError("smoothed_type must be 'none' or 'shared', got '%s'" % smoothed_type)
+    if sigma_delta_type not in ('plain', 'effective'):
+        raise ValueError("sigma_delta_type must be 'plain' or 'effective', got '%s'" % sigma_delta_type)
 
-    if tidal_type in ('s2', 's2_per_type'):
-        def model(counts, delta, s2):
-            _density_model_body(counts, 1.0 + delta, mean_type, z_type, sigma_type,
-                                tidal_type=tidal_type, s2=s2)
-    else:
-        def model(counts, delta):
-            _density_model_body(counts, 1.0 + delta, mean_type, z_type, sigma_type)
+    def model(counts, delta, s2=None, smooth_fields=None):
+        _density_model_body(counts, 1.0 + delta, mean_type, z_type, sigma_type,
+                            tidal_type=tidal_type, s2=s2,
+                            smoothed_type=smoothed_type, smooth_fields=smooth_fields,
+                            sigma_delta_type=sigma_delta_type)
 
     return model

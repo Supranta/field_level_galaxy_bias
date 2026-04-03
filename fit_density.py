@@ -14,7 +14,7 @@ Top-level keys:
       mean_type:  neyrinck | powerlaw
       z_type:     shared   | zero
       sigma_type: density  | constant
-      tidal_type: none     | s2 | s2_per_type
+      tidal_type: none     | s2
 
       # sampling (inference_mode: sample)
       num_warmup:  500
@@ -66,25 +66,18 @@ from lnp.data import load_data
 from lnp.models import build_model
 from lnp.inference import (run_nuts, run_nuts_with_warmstart,
                            run_map, run_map_with_warmstart)
-from lnp.power_spectrum import Field2D
-
-
-def _compute_s2_flat(delta_slab, box_size):
-    """Compute the squared tidal field for each slab and return flattened."""
-    N_grid = delta_slab.shape[-1]
-    field  = Field2D(N_grid, box_size)
-    s2_slabs = np.stack([field.get_s2_fields(delta_slab[i])
-                         for i in range(delta_slab.shape[0])])
-    return s2_slabs.flatten()
+from lnp.power_spectrum import Field2D, compute_band_pass_fields, compute_s2_flat
 
 
 def _parse_model_block(block):
     """Extract build_model kwargs from a model config block."""
     return dict(
-        mean_type  = block['mean_type'],
-        z_type     = block['z_type'],
-        sigma_type = block.get('sigma_type'),
-        tidal_type = block.get('tidal_type', 'none'),
+        mean_type        = block['mean_type'],
+        z_type           = block['z_type'],
+        sigma_type       = block.get('sigma_type'),
+        tidal_type       = block.get('tidal_type', 'none'),
+        smoothed_type    = block.get('smoothed_type', 'none'),
+        sigma_delta_type = block.get('sigma_delta_type', 'plain'),
     )
 
 
@@ -109,26 +102,40 @@ def main(config_path):
     Ng_flat = Ng.reshape(N_types, -1)
 
     print("inference_mode: %s" % mode)
-    print("Fit model: mean=%s  z=%s  sigma=%s  tidal=%s"
+    print("Fit model: mean=%s  z=%s  sigma=%s  tidal=%s  smoothed=%s  sigma_delta=%s"
           % (fit_kwargs['mean_type'], fit_kwargs['z_type'],
-             fit_kwargs['sigma_type'], fit_kwargs['tidal_type']))
+             fit_kwargs['sigma_type'], fit_kwargs['tidal_type'],
+             fit_kwargs['smoothed_type'], fit_kwargs['sigma_delta_type']))
     if nested_cfg:
         nested_kwargs = _parse_model_block(nested_cfg)
-        print("Nested:    mean=%s  z=%s  sigma=%s  tidal=%s"
+        print("Nested:    mean=%s  z=%s  sigma=%s  tidal=%s  smoothed=%s  sigma_delta=%s"
               % (nested_kwargs['mean_type'], nested_kwargs['z_type'],
-                 nested_kwargs['sigma_type'], nested_kwargs['tidal_type']))
+                 nested_kwargs['sigma_type'], nested_kwargs['tidal_type'],
+                 nested_kwargs['smoothed_type'], nested_kwargs['sigma_delta_type']))
     print("N_types: %d,  N_pix: %d" % (N_types, Ng_flat.shape[1]))
 
-    needs_s2 = fit_kwargs['tidal_type'] in ('s2', 's2_per_type')
-    s2_flat  = None
+    needs_s2         = fit_kwargs['tidal_type'] == 's2'
+    needs_smooth     = fit_kwargs['smoothed_type'] != 'none'
+    s2_flat          = None
+    smooth_fields    = None
+    smoothing_scales = []
+
     if needs_s2:
         box_size = cfg.get('box_size', 1000.)
         print("Computing tidal field s2 (box_size=%.1f)..." % box_size)
-        s2_flat = _compute_s2_flat(delta_slab, box_size)
+        s2_flat = compute_s2_flat(delta_slab, box_size)
+
+    if needs_smooth:
+        smoothing_scales = fit_cfg.get('smoothing_scales')
+        assert smoothing_scales, "smoothing_scales must be set when smoothed_type != 'none'"
+        box_size = cfg.get('box_size', 1000.)
+        print("Computing band-pass fields (scales=%s, box_size=%.1f)..." % (smoothing_scales, box_size))
+        smooth_fields = compute_band_pass_fields(delta_slab, smoothing_scales, box_size)
 
     fit_model = build_model(**fit_kwargs)
     os.makedirs(savedir, exist_ok=True)
-    n_tidal   = N_types if fit_kwargs['tidal_type'] == 's2_per_type' else 1
+    n_scales            = len(smoothing_scales) if needs_smooth else 0
+    b_smooth_init_shape = (n_scales,) if needs_smooth else None
 
     if mode == 'sample':
         fit_warmup  = fit_cfg.get('num_warmup',  500)
@@ -139,6 +146,7 @@ def main(config_path):
                 fit_model, Ng_flat,
                 delta=delta_slab.flatten(),
                 s2=s2_flat,
+                smooth_fields=smooth_fields,
                 num_warmup=fit_warmup, num_samples=fit_samples,
                 compute_log_lik=True,
             )
@@ -149,10 +157,11 @@ def main(config_path):
                 nested_model, fit_model,
                 Ng_flat, delta_slab.flatten(),
                 s2=s2_flat,
+                smooth_fields=smooth_fields,
                 nested_warmup=nested_warmup,
                 num_warmup=fit_warmup, num_samples=fit_samples,
                 compute_log_lik=True,
-                n_tidal_params=n_tidal,
+                b_smooth_init_shape=b_smooth_init_shape,
             )
 
     else:  # optimize
@@ -164,6 +173,7 @@ def main(config_path):
                 fit_model, Ng_flat,
                 delta=delta_slab.flatten(),
                 s2=s2_flat,
+                smooth_fields=smooth_fields,
                 num_steps=fit_steps, learning_rate=fit_lr,
                 compute_log_lik=True,
             )
@@ -175,10 +185,11 @@ def main(config_path):
                 nested_model, fit_model,
                 Ng_flat, delta_slab.flatten(),
                 s2=s2_flat,
+                smooth_fields=smooth_fields,
                 nested_steps=nested_steps, nested_lr=nested_lr,
                 num_steps=fit_steps, learning_rate=fit_lr,
                 compute_log_lik=True,
-                n_tidal_params=n_tidal,
+                b_smooth_init_shape=b_smooth_init_shape,
             )
 
     savepath = savedir + '/samples.pkl'
